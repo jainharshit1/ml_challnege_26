@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Raw challenge data
+6ab10eb3b23ba_student_resource/student_resource/dataset/
+6ab10eb3b23ba_student_resource/__MACOSX/
+
+# Generated pipeline artifacts and outputs
+artifacts/
+output/
+code/business_entity_resolution/artifacts/
+code/business_entity_resolution/output/
+stage_0_output.txt
+stage_0_country.txt
+
+# Local secrets and configuration
+.env
+.env.*
+!.env.example
+
+# IDE files
+.vscode/
+
+.DS_Store
+*.pdf
