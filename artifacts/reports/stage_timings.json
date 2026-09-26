@@ -46,5 +46,9 @@
   "features": {
     "seconds": 68.42073154449463,
     "finished_at": "2026-09-26T09:32:04"
+  },
+  "gbdt_train": {
+    "seconds": 0.8777635097503662,
+    "finished_at": "2026-09-26T09:32:05"
   }
 }
