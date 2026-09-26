@@ -1,0 +1,42 @@
+{
+  "stage0": {
+    "seconds": 0.25603508949279785,
+    "finished_at": "2026-09-26T09:20:57"
+  },
+  "splits": {
+    "seconds": 7.379209756851196,
+    "finished_at": "2026-09-26T09:21:05"
+  },
+  "abbrev_seed": {
+    "seconds": 0.25861644744873047,
+    "finished_at": "2026-09-26T09:21:05"
+  },
+  "normalize_first": {
+    "seconds": 55.843812704086304,
+    "finished_at": "2026-09-26T09:22:01"
+  },
+  "abbrev_mine": {
+    "seconds": 41.09323453903198,
+    "finished_at": "2026-09-26T09:22:42"
+  },
+  "normalize_final": {
+    "seconds": 55.60386824607849,
+    "finished_at": "2026-09-26T09:23:38"
+  },
+  "idf": {
+    "seconds": 0.8375482559204102,
+    "finished_at": "2026-09-26T09:23:39"
+  },
+  "embed": {
+    "seconds": 68.82085180282593,
+    "finished_at": "2026-09-26T09:24:48"
+  },
+  "block": {
+    "seconds": 117.18380451202393,
+    "finished_at": "2026-09-26T09:26:46"
+  },
+  "prefilter_train": {
+    "seconds": 10.051401853561401,
+    "finished_at": "2026-09-26T09:26:56"
+  }
+}
