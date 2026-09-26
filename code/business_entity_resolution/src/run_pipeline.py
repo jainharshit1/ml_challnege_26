@@ -108,12 +108,19 @@ def _run(stage: str) -> None:
 
     elif stage == "features":
         from . import features as F
+        from joblib import Parallel, delayed
         countries = sorted({p.stem.split("__")[-1] for p in
                             C.PREFILTER_DIR.glob("*__*.parquet")})
-        for split in ("train", "test"):
-            for country in countries:
-                if (C.PREFILTER_DIR / f"{split}__{country}.parquet").exists():
-                    F.build_and_save(split, country)
+        jobs = [(split, country) for split in ("train", "test") for country in countries
+                if (C.PREFILTER_DIR / f"{split}__{country}.parquet").exists()]
+        # Each worker loads ~15 GB of DFs; cap by RAM/60GB assumption + user knob
+        import os as _os
+        n_jobs = int(_os.environ.get("FEATURES_JOBS", "3"))
+        n_jobs = min(len(jobs), max(1, n_jobs))
+        print(f"[features] {len(jobs)} (split,country) jobs on {n_jobs} parallel workers")
+        Parallel(n_jobs=n_jobs, backend="loky", verbose=5)(
+            delayed(F.build_and_save)(s, c) for s, c in jobs
+        )
 
     elif stage == "gbdt_train":
         from . import train_gbdt
@@ -168,7 +175,16 @@ def _run(stage: str) -> None:
     else:
         raise ValueError(f"Unknown stage: {stage}")
 
-    print(f"===== [{stage}] done in {time.time() - t0:.1f}s =====")
+    _dt = time.time() - t0
+    print(f"===== [{stage}] done in {_dt:.1f}s =====")
+
+    # Append timing to stage_timings.json
+    import json as _json
+    tf = C.REPORTS_DIR / "stage_timings.json"
+    C.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    timings = _json.loads(tf.read_text()) if tf.exists() else {}
+    timings[stage] = {"seconds": _dt, "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    tf.write_text(_json.dumps(timings, indent=2))
 
 
 def main() -> None:

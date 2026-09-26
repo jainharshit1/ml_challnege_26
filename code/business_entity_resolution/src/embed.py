@@ -24,8 +24,13 @@ def _dense_text_series(df: pd.DataFrame) -> pd.Series:
     return df.apply(_pick, axis=1)
 
 
-def _load_encoder(model_name: str = C.DENSE_MODEL):
+def _load_encoder(model_name: str | None = None):
     """Prefer FlagEmbedding for bge-m3; fall back to sentence-transformers."""
+    if model_name is None:
+        if C.USE_FALLBACK_DENSE:
+            model_name = C.DENSE_MODEL_LOCAL or C.DENSE_MODEL_FALLBACK
+        else:
+            model_name = C.DENSE_MODEL_LOCAL or C.DENSE_MODEL
     print(f"[embed] torch device: {C.torch_device()}  model: {model_name}")
     try:
         from FlagEmbedding import BGEM3FlagModel  # type: ignore
@@ -34,7 +39,9 @@ def _load_encoder(model_name: str = C.DENSE_MODEL):
     except Exception:
         from sentence_transformers import SentenceTransformer  # type: ignore
         device = C.torch_device()
-        m = SentenceTransformer(model_name, device=device)
+        local = model_name.startswith("/") or model_name.startswith(".")
+        m = SentenceTransformer(model_name, device=device,
+                                local_files_only=local)
         if C.DENSE_FP16 and device == "cuda":
             try:
                 m.half()

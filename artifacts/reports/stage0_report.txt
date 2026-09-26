@@ -1,0 +1,300 @@
+postal_coverage:
+  train:
+    s1:
+      US: 0.11074217702338941
+      India: 0.0031567457891185117
+    s2:
+      India: 0.011528898567201193
+      US: 0.11841122613668645
+    s3:
+      US: 0.11813229797833225
+      India: 0.010682816311809664
+  test:
+    s1:
+      US: 0.11064596007274854
+      France: 0.0042628308897214124
+      India: 0.00297782924643142
+    s2:
+      India: 0.011203576980538926
+      France: 0.005293028783954005
+      US: 0.12101606878530244
+    s3:
+      India: 0.010334719334719335
+      France: 0.005463255947458705
+      US: 0.12085926871600518
+house_number_coverage:
+  train:
+    s1:
+      US: 0.7811168201457654
+      India: 0.56460119476261
+    s2:
+      India: 0.4968765471684742
+      US: 0.694904927942265
+    s3:
+      US: 0.7083486853229092
+      India: 0.4850532746377178
+  test:
+    s1:
+      US: 0.7811797812114504
+      France: 0.8884726269213573
+      India: 0.5648912450338648
+    s2:
+      India: 0.4928808487545215
+      France: 0.6931550318605358
+      US: 0.6989114693827385
+    s3:
+      India: 0.48117505197505195
+      France: 0.7007264749902613
+      US: 0.7107227677839504
+script_distribution:
+  train:
+    s1:
+      name:
+        US:
+          latin: 1.0
+        India:
+          latin: 1.0
+      address:
+        US:
+          latin: 1.0
+        India:
+          latin: 1.0
+    s2:
+      name:
+        India:
+          latin: 0.7692783077006183
+          devanagari: 0.13095407421651017
+          telugu: 0.01916593278121359
+          kannada: 0.018130646313136243
+          tamil: 0.016434739039914284
+          gujarati: 0.015042628130948622
+          bengali: 0.014948466125714207
+          malayalam: 0.009156016035293903
+          other: 0.003648529908083015
+          gurmukhi: 0.0032406597485676223
+        US:
+          latin: 0.9999360252875796
+          empty: 6.397471242040866e-05
+      address:
+        India:
+          latin: 0.9691188269991213
+          empty: 0.028667870288368664
+          devanagari: 0.0017444750443428706
+          tamil: 0.00019674903198980671
+          bengali: 0.0001060561532640268
+          telugu: 0.00010456938476032548
+          gujarati: 3.915157059746783e-05
+          kannada: 1.9823580049350802e-05
+          gurmukhi: 2.4779475061688503e-06
+        US:
+          latin: 0.9631661449799573
+          empty: 0.03683385502004265
+    s3:
+      name:
+        US:
+          latin: 0.9998665638714269
+          empty: 0.000133436128573123
+        India:
+          latin: 0.8760575869975945
+          devanagari: 0.07012039912136199
+          telugu: 0.010272047843890965
+          kannada: 0.009847571337342069
+          tamil: 0.00887477328558524
+          bengali: 0.008089633555765956
+          gujarati: 0.008001713032137788
+          malayalam: 0.004980272241647195
+          other: 0.0019337788288324486
+          gurmukhi: 0.0018222237558418698
+      address:
+        US:
+          latin: 0.9649949401524768
+          empty: 0.035005059847523196
+        India:
+          latin: 0.9628616145138822
+          empty: 0.030700334239797084
+          devanagari: 0.004927330851075396
+          tamil: 0.0006357693778488495
+          bengali: 0.0003833523906583026
+          telugu: 0.0002869234292596667
+          gujarati: 0.00012479042063352882
+          kannada: 7.184903006172871e-05
+          malayalam: 4.2542188852339374e-06
+          other: 3.3088369107375068e-06
+          gurmukhi: 4.7269098724821524e-07
+  test:
+    s1:
+      name:
+        US:
+          latin: 1.0
+        France:
+          latin: 1.0
+        India:
+          latin: 1.0
+      address:
+        US:
+          latin: 1.0
+        France:
+          latin: 1.0
+        India:
+          latin: 1.0
+    s2:
+      name:
+        India:
+          latin: 0.7677669600638253
+          devanagari: 0.13122528447849033
+          telugu: 0.019212000527552738
+          kannada: 0.018681853266827093
+          tamil: 0.016566020846981597
+          bengali: 0.015119142597072947
+          gujarati: 0.015010605107315902
+          malayalam: 0.009371844683284577
+          other: 0.0036902746517395186
+          gurmukhi: 0.0033560137769100542
+        France:
+          latin: 0.9999872046040678
+          empty: 1.2795395932201462e-05
+        US:
+          latin: 0.9999460276915348
+          empty: 5.397230846510236e-05
+      address:
+        India:
+          latin: 0.9749853517630855
+          empty: 0.022816223543986873
+          devanagari: 0.001711519459993557
+          tamil: 0.00022096676201533794
+          bengali: 0.00011588863448162539
+          telugu: 0.00010291602614413001
+          gujarati: 2.853973834248983e-05
+          kannada: 1.7729231394577018e-05
+          other: 4.3242027791651263e-07
+          gurmukhi: 4.3242027791651263e-07
+        France:
+          latin: 0.9693806175342419
+          empty: 0.0306193824657581
+        US:
+          latin: 0.9705519603704317
+          empty: 0.029448039629568275
+    s3:
+      name:
+        India:
+          latin: 0.8744079002079002
+          devanagari: 0.07072390852390853
+          telugu: 0.010497297297297297
+          kannada: 0.01018004158004158
+          tamil: 0.008997505197505197
+          bengali: 0.00818128898128898
+          gujarati: 0.008032432432432433
+          malayalam: 0.005169230769230769
+          other: 0.002004158004158004
+          gurmukhi: 0.0018062370062370062
+        France:
+          latin: 0.9999849647697218
+          empty: 1.5035230278220103e-05
+        US:
+          latin: 0.9998833325367052
+          empty: 0.00011666746329472
+      address:
+        India:
+          latin: 0.9689097713097713
+          empty: 0.024632016632016633
+          devanagari: 0.0049251559251559255
+          tamil: 0.0006436590436590437
+          bengali: 0.00039875259875259876
+          telugu: 0.00029313929313929315
+          gujarati: 0.00011143451143451143
+          kannada: 7.484407484407484e-05
+          malayalam: 6.652806652806652e-06
+          gurmukhi: 2.9106029106029107e-06
+          other: 1.663201663201663e-06
+        France:
+          latin: 0.9705569185978964
+          empty: 0.029443081402103565
+        US:
+          latin: 0.9715696296604669
+          empty: 0.028430370339533155
+name_duplication:
+  train:
+    s1:
+      US:
+        records_sharing_name: 457877
+        unique_shared_names: 110510
+        fraction_records_in_shared: 0.34592443675852746
+      India:
+        records_sharing_name: 387537
+        unique_shared_names: 67553
+        fraction_records_in_shared: 0.43879332599627713
+    s2:
+      India:
+        records_sharing_name: 484668
+        unique_shared_names: 125406
+        fraction_records_in_shared: 0.24019637238396888
+      US:
+        records_sharing_name: 544505
+        unique_shared_names: 161025
+        fraction_records_in_shared: 0.18048990044805502
+    s3:
+      US:
+        records_sharing_name: 558954
+        unique_shared_names: 161438
+        fraction_records_in_shared: 0.1763230681098378
+      India:
+        records_sharing_name: 426421
+        unique_shared_names: 124220
+        fraction_records_in_shared: 0.2015653634733712
+  test:
+    s1:
+      US:
+        records_sharing_name: 185561
+        unique_shared_names: 46379
+        fraction_records_in_shared: 0.27983610463485475
+      France:
+        records_sharing_name: 88355
+        unique_shared_names: 21911
+        fraction_records_in_shared: 0.34054468649307
+      India:
+        records_sharing_name: 350329
+        unique_shared_names: 62075
+        fraction_records_in_shared: 0.4325124137948063
+    s2:
+      India:
+        records_sharing_name: 510624
+        unique_shared_names: 132853
+        fraction_records_in_shared: 0.22080417199084135
+      France:
+        records_sharing_name: 169579
+        unique_shared_names: 52215
+        fraction_records_in_shared: 0.24109227186519908
+      US:
+        records_sharing_name: 264362
+        unique_shared_names: 85095
+        fraction_records_in_shared: 0.14126957832130088
+    s3:
+      India:
+        records_sharing_name: 447381
+        unique_shared_names: 130641
+        fraction_records_in_shared: 0.18602120582120582
+      France:
+        records_sharing_name: 179648
+        unique_shared_names: 53553
+        fraction_records_in_shared: 0.2455499135474259
+      US:
+        records_sharing_name: 268740
+        unique_shared_names: 84869
+        fraction_records_in_shared: 0.1381198858406302
+source_asymmetry_name_jaro:
+  s2:
+    n: 9724
+    mean: 0.8693889370338097
+    p25: 0.85998778998779
+    p50: 0.9375878043525103
+    p75: 0.9714285714285714
+  s3:
+    n: 10276
+    mean: 0.8708130786005827
+    p25: 0.8405106658047834
+    p50: 0.9343893703196029
+    p75: 0.9714285714285714
+matches_by_source:
+  total_true_pairs: 7638365
+  share_S2: 0.4835614689792907
+  share_S3: 0.5164385310207092

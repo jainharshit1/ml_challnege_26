@@ -28,10 +28,11 @@ def _load_reranker(prefer_finetuned: bool = True):
     if prefer_finetuned and model_path.exists():
         src = str(model_path)
     else:
-        src = C.RERANKER_MODEL
+        src = C.RERANKER_MODEL_LOCAL or C.RERANKER_MODEL
     print(f"[reranker_infer] loading {src}")
-    tok = AutoTokenizer.from_pretrained(src)
-    model = AutoModelForSequenceClassification.from_pretrained(src, num_labels=1)
+    _local = src.startswith("/") or src.startswith(".")
+    tok = AutoTokenizer.from_pretrained(src, local_files_only=_local)
+    model = AutoModelForSequenceClassification.from_pretrained(src, num_labels=1, local_files_only=_local)
     model.eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[reranker_infer] torch device: {device}")
@@ -58,11 +59,12 @@ def _load_reranker(prefer_finetuned: bool = True):
 
 
 def _build_text(row) -> str:
+    def _s(v): return v if isinstance(v, str) else ""
     return _pair_text(
-        row["core_name"] or row["name_roman"] or "",
-        row["address_expanded"] or "",
-        name_original=row["name_roman"] or "",
-        script=row["name_script"] if "name_script" in row else "latin",
+        _s(row["core_name"]) or _s(row["name_roman"]),
+        _s(row["address_expanded"]),
+        name_original=_s(row["name_roman"]),
+        script=row["name_script"] if isinstance(row.get("name_script"), str) else "latin",
     )
 
 
@@ -78,8 +80,23 @@ def score_partition(split: str, country: str,
         print(f"[reranker_infer] cached: {out_path.name}")
         return out_path
 
-    cand = pd.read_parquet(src_path, columns=["s1_id", "cand_id",
-                                                "cand_source"])
+    cand = pd.read_parquet(src_path)
+    # Cascade: skip cross-encoder for confident matches/non-matches (§ cheap-rerank).
+    if getattr(C, "RERANK_CASCADE_ENABLED", False) and "stage_a_score" in cand.columns:
+        lo = getattr(C, "RERANK_CASCADE_LOW", 0.15)
+        hi = getattr(C, "RERANK_CASCADE_HIGH", 0.85)
+        uncertain = cand["stage_a_score"].between(lo, hi, inclusive="both")
+        skipped = (~uncertain).sum()
+        print(f"[reranker_infer] cascade: {uncertain.sum():,} uncertain / "
+              f"{skipped:,} skipped (score using stage_a directly)")
+        cand_uncertain = cand.loc[uncertain, ["s1_id", "cand_id", "cand_source"]].copy()
+        cand_confident = cand.loc[~uncertain, ["s1_id", "cand_id",
+                                                "stage_a_score"]].rename(
+            columns={"stage_a_score": "rerank_score"})
+        cand = cand_uncertain
+    else:
+        cand = cand[["s1_id", "cand_id", "cand_source"]]
+        cand_confident = None
     s1_df = pd.read_parquet(
         C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet",
         columns=["entity_id", "core_name", "name_roman", "name_script",
@@ -130,6 +147,9 @@ def score_partition(split: str, country: str,
         "cand_id": cand["cand_id"].iloc[order].values,
         "rerank_score": scores,
     })
+    if cand_confident is not None and not cand_confident.empty:
+        out = pd.concat([out, cand_confident], ignore_index=True)
+        print(f"[reranker_infer] merged {len(cand_confident):,} cascade-skipped rows")
     write_parquet(out, out_path)
     print(f"[reranker_infer] wrote {out_path}")
     return out_path

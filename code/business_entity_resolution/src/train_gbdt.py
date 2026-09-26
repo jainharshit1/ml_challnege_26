@@ -80,6 +80,7 @@ def train(loco_country: str | None = None) -> Path:
         objective="binary",
         metric=["binary_logloss", "auc"],
         device_type=device,
+        num_threads=C.N_JOBS,
         num_leaves=C.LGB_NUM_LEAVES,
         learning_rate=C.LGB_LR,
         feature_fraction=C.LGB_FEATURE_FRACTION,

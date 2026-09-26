@@ -104,8 +104,10 @@ GENERIC_ADDRESS_WORDS = {
 # ---------------------------------------------------------------------------
 # Field-level cleanup (plan §3.1)
 # ---------------------------------------------------------------------------
-def _nfkc(s: str) -> str:
-    return unicodedata.normalize("NFKC", s) if s else ""
+def _nfkc(s) -> str:
+    if not isinstance(s, str) or not s:
+        return ""
+    return unicodedata.normalize("NFKC", s)
 
 
 def _romanize(s: str, script: str) -> tuple[str, bool]:
@@ -313,8 +315,8 @@ def _all_numbers(addr: str) -> list[str]:
 # ---------------------------------------------------------------------------
 def _normalize_row(name: str, address: str, name_map: dict[str, str],
                    addr_map: dict[str, str]) -> dict:
-    name = name or ""
-    address = address or ""
+    name = name if isinstance(name, str) else ""
+    address = address if isinstance(address, str) else ""
 
     # 1. NFKC + script detect
     name_nfkc = _nfkc(name)
@@ -401,16 +403,27 @@ def normalize_source(split: str, source: str) -> None:
 
     print(f"[normalize] {split}/{source} ← {path}")
     df = read_source_tsv(path)
+    if C.NORMALIZE_ROW_CAP:
+        df = df.iloc[:C.NORMALIZE_ROW_CAP].copy()
+        print(f"[normalize] capped to {C.NORMALIZE_ROW_CAP:,} rows (NORMALIZE_ROW_CAP)")
     total = len(df)
     print(f"[normalize] {total:,} rows")
 
-    # Vectorize the row-level function by applying in chunks.
-    results: list[dict] = []
+    # Parallel row-level normalization across CPU cores.
+    from joblib import Parallel, delayed
+    def _chunk(names, addrs):
+        return [_normalize_row(n, a, name_map, addr_map) for n, a in zip(names, addrs)]
+
+    chunks = []
     for start in range(0, total, C.CHUNK_SIZE):
         chunk = df.iloc[start:start + C.CHUNK_SIZE]
-        for name, addr in zip(chunk["business_name"], chunk["business_address"]):
-            results.append(_normalize_row(name, addr, name_map, addr_map))
-        print(f"[normalize] {split}/{source}: {min(start+C.CHUNK_SIZE, total):,}/{total:,}")
+        chunks.append((chunk["business_name"].tolist(),
+                       chunk["business_address"].tolist()))
+    print(f"[normalize] {split}/{source}: {len(chunks)} chunks × {C.CHUNK_SIZE:,} rows on {C.N_JOBS} cores")
+    parts = Parallel(n_jobs=C.N_JOBS, backend="loky", verbose=5)(
+        delayed(_chunk)(n, a) for n, a in chunks
+    )
+    results: list[dict] = [r for part in parts for r in part]
 
     derived = pd.DataFrame(results)
     full = pd.concat(

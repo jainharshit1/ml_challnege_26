@@ -176,15 +176,16 @@ def _key_arm(s1_df: pd.DataFrame, pool_df: pd.DataFrame,
 
 
 def _s1_keys_locrare(row):
-    if not getattr(row, "core_name", ""):
+    core = getattr(row, "core_name", "")
+    if not isinstance(core, str) or not core:
         return []
-    toks = row.core_name.split()
+    toks = core.split()
     if not toks:
         return []
     rare = max(toks, key=len)
     locs = set(_split_toks(getattr(row, "locality_tokens", "")))
     postal = getattr(row, "postal_code", "")
-    if postal:
+    if isinstance(postal, str) and postal:
         locs.add(postal)
     return [f"{rare}||{loc}" for loc in locs]
 
@@ -205,12 +206,12 @@ def _pool_keys_house(row):
 
 
 def _s1_keys_acr(row):
-    a = getattr(row, "acronym", "") or ""
-    if len(a) < 2:
+    a = getattr(row, "acronym", "")
+    if not isinstance(a, str) or len(a) < 2:
         return []
     keys = []
     pp = getattr(row, "postal_prefix3", "")
-    if pp:
+    if isinstance(pp, str) and pp:
         keys.append(f"{a}||{pp}")
     for loc in _split_toks(getattr(row, "locality_tokens", "")):
         keys.append(f"{a}||{loc}")

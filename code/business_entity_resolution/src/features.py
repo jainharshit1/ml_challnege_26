@@ -110,22 +110,22 @@ def build(split: str, country: str, include_labels: bool = True
         c = p_src.loc[row.cand_id]
 
         # Names
-        s_core = s["core_name"] or ""
-        c_core = c["core_name"] or ""
-        s_exp = s["name_expanded"] or ""
-        c_exp = c["name_expanded"] or ""
-        s_roman = s["name_roman"] or s_core
-        c_roman = c["name_roman"] or c_core
+        s_core = s["core_name"] if isinstance(s["core_name"], str) else ""
+        c_core = c["core_name"] if isinstance(c["core_name"], str) else ""
+        s_exp = s["name_expanded"] if isinstance(s["name_expanded"], str) else ""
+        c_exp = c["name_expanded"] if isinstance(c["name_expanded"], str) else ""
+        s_roman = (s["name_roman"] if isinstance(s["name_roman"], str) else "") or s_core
+        c_roman = (c["name_roman"] if isinstance(c["name_roman"], str) else "") or c_core
         s_toks = s_core.split()
         c_toks = c_core.split()
 
         # Addresses
-        s_addr = s["address_expanded"] or ""
-        c_addr = c["address_expanded"] or ""
+        s_addr = s["address_expanded"] if isinstance(s["address_expanded"], str) else ""
+        c_addr = c["address_expanded"] if isinstance(c["address_expanded"], str) else ""
 
         # Legal suffix agreement
-        s_leg = s["legal_suffix"] or ""
-        c_leg = c["legal_suffix"] or ""
+        s_leg = s["legal_suffix"] if isinstance(s["legal_suffix"], str) else ""
+        c_leg = c["legal_suffix"] if isinstance(c["legal_suffix"], str) else ""
         if not s_leg and not c_leg:
             leg = 0        # both missing
         elif s_leg == c_leg:
@@ -154,20 +154,21 @@ def build(split: str, country: str, include_labels: bool = True
             "f_name_core_eq": int(s_core == c_core and s_core != ""),
             "f_name_sorted_eq": int(s["name_sorted"] == c["name_sorted"]
                                     and s["name_sorted"] != ""),
-            "f_acronym_match": int(
+            "f_acronym_match": int(bool(
                 (s["acronym"] and s["acronym"] == c["acronym"])
                 or (s["acronym"] and s["acronym"] == "".join(t[0] for t in c_toks))
                 or (c["acronym"] and c["acronym"] == "".join(t[0] for t in s_toks))
-            ),
+            )),
             "f_legal_state": leg,
             "f_domain_match": int(
                 bool(s["name_domain"]) and s["name_domain"] == c["name_domain"]
             ),
-            "f_expansion_changed_s": int(s["expansion_changed_name"]),
-            "f_expansion_changed_c": int(c["expansion_changed_name"]),
-            "f_romanized_used": int(not (s["romanization_ok"] and c["romanization_ok"])
-                                     or s["name_script"] != "latin"
-                                     or c["name_script"] != "latin"),
+            "f_expansion_changed_s": int(bool(s["expansion_changed_name"])),
+            "f_expansion_changed_c": int(bool(c["expansion_changed_name"])),
+            "f_romanized_used": int(bool(
+                not (s["romanization_ok"] and c["romanization_ok"])
+                or s["name_script"] != "latin"
+                or c["name_script"] != "latin")),
             "f_script_same": int(s["name_script"] == c["name_script"]),
 
             # ---- Address features ----

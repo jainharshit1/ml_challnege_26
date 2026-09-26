@@ -1,0 +1,7 @@
+{
+  "n_france": 259452,
+  "pred_singleton_rate": 1.0,
+  "mean_matches": 0.0,
+  "reference_train_singleton": 0.0558,
+  "reference_train_mean_matches": 3.461
+}

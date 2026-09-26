@@ -51,8 +51,8 @@ SEED_ADDR = {
 
 
 # --- Helpers ---------------------------------------------------------------
-def _tokens(s: str) -> list[str]:
-    if not s:
+def _tokens(s) -> list[str]:
+    if not isinstance(s, str) or not s:
         return []
     return [t for t in s.lower().split() if t]
 

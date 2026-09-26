@@ -1,0 +1,16 @@
+{
+  "france_pair": 0.85,
+  "france_singleton": 0.9,
+  "france_margin": 0.1,
+  "loco_shift_pair": 0.0,
+  "in_country": {
+    "pair_thresh": 0.85,
+    "singleton_thresh": 0.9,
+    "margin_thresh": 0.1,
+    "macro_f05_V": 0.05584959353277567,
+    "singleton_f05_V": 1.0,
+    "nonsingleton_f05_V": 0.0,
+    "pred_singleton_rate": 1.0,
+    "mean_matches": 0.0
+  }
+}

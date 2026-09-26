@@ -24,9 +24,12 @@ from . import splits as splits_mod
 from .io_utils import explode_ground_truth, read_ground_truth
 
 
-def _pair_text(name: str, address: str, name_original: str = "",
+def _pair_text(name, address, name_original: str = "",
                script: str = "latin") -> str:
     """Build 'name | address' with original+romanized when non-Latin (§6.1)."""
+    name = name if isinstance(name, str) else ""
+    address = address if isinstance(address, str) else ""
+    name_original = name_original if isinstance(name_original, str) else ""
     if script != "latin" and name_original and name_original != name:
         name_field = f"{name_original} ({name})"
     else:
@@ -191,9 +194,11 @@ def train() -> Path:
 
     print(f"[reranker_train] torch device: {C.torch_device()}  "
           f"(fp16={'yes' if torch.cuda.is_available() else 'no'})")
-    tok = AutoTokenizer.from_pretrained(C.RERANKER_MODEL)
+    _reranker_src = C.RERANKER_MODEL_LOCAL or C.RERANKER_MODEL
+    tok = AutoTokenizer.from_pretrained(_reranker_src, local_files_only=bool(C.RERANKER_MODEL_LOCAL))
     model = AutoModelForSequenceClassification.from_pretrained(
-        C.RERANKER_MODEL, num_labels=1,
+        _reranker_src, num_labels=1,
+        local_files_only=bool(C.RERANKER_MODEL_LOCAL),
     )
 
     class PairDataset(torch.utils.data.Dataset):
@@ -231,13 +236,15 @@ def train() -> Path:
             return (loss, outputs) if return_outputs else loss
 
     out_dir = C.MODELS_DIR / "bge_reranker_ft"
-    args = TrainingArguments(
+    n_steps = max(1, len(df) // C.RERANK_TRAIN_BATCH_SIZE) * C.RERANK_EPOCHS
+    warmup_steps = max(1, int(n_steps * C.RERANK_WARMUP_RATIO))
+    _ta_kwargs: dict = dict(
         output_dir=str(out_dir),
         num_train_epochs=C.RERANK_EPOCHS,
         per_device_train_batch_size=C.RERANK_TRAIN_BATCH_SIZE,
         learning_rate=C.RERANK_LR,
         weight_decay=C.RERANK_WEIGHT_DECAY,
-        warmup_ratio=C.RERANK_WARMUP_RATIO,
+        warmup_steps=warmup_steps,
         gradient_accumulation_steps=C.RERANK_GRAD_ACCUM,
         fp16=torch.cuda.is_available(),
         logging_steps=200,
@@ -246,9 +253,21 @@ def train() -> Path:
         seed=C.SEED,
         dataloader_num_workers=2,
     )
+    try:
+        args = TrainingArguments(**_ta_kwargs)
+    except TypeError:
+        _ta_kwargs.pop("dataloader_num_workers", None)
+        args = TrainingArguments(**_ta_kwargs)
+    import inspect as _inspect
+    _trainer_params = set(_inspect.signature(Trainer.__init__).parameters)
+    _tok_kwarg = (
+        {"processing_class": tok} if "processing_class" in _trainer_params
+        else {"tokenizer": tok} if "tokenizer" in _trainer_params
+        else {}
+    )
     trainer = BCEWithLogitsTrainer(
         model=model, args=args, train_dataset=PairDataset(df),
-        data_collator=collate, tokenizer=tok,
+        data_collator=collate, **_tok_kwarg,
     )
     trainer.train()
     model.save_pretrained(str(out_dir))

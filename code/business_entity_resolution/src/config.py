@@ -11,9 +11,24 @@ from pathlib import Path
 # 0.1  = fast dev; keeps candidate density identical by also downsampling
 #        the unmatched S2/S3 distractors by the same fraction.
 # ---------------------------------------------------------------------------
-SUBSAMPLE_FRACTION: float = 1.0
+SUBSAMPLE_FRACTION: float = 0.02
+
+# Set to a positive integer to cap rows per source during normalization for
+# smoke-test runs. None (or 0) = process all rows (production).
+NORMALIZE_ROW_CAP: int | None = 25_000
+
+# GPU/CPU-heavy stage knobs (adjust based on hardware)
+# A5000 24GB defaults below
 
 SEED: int = 42
+
+# ---- CPU parallelism (set to your available core budget) ------------------
+import os as _os_cpu
+N_JOBS: int = int(_os_cpu.environ.get("N_JOBS", str(min(38, (_os_cpu.cpu_count() or 8) - 2))))
+_os_cpu.environ.setdefault("OMP_NUM_THREADS", str(N_JOBS))
+_os_cpu.environ.setdefault("MKL_NUM_THREADS", str(N_JOBS))
+_os_cpu.environ.setdefault("OPENBLAS_NUM_THREADS", str(N_JOBS))
+_os_cpu.environ.setdefault("NUMEXPR_NUM_THREADS", str(N_JOBS))
 
 # ----------------------------- paths ----------------------------------------
 # working dir = D:\Opportunity\ml challenge  (parents[3] from src/config.py)
@@ -63,14 +78,29 @@ MATCH_COUNT_BUCKETS = [(0, 0), (1, 1), (2, 3), (4, 5), (6, 99)]
 # ----------------------------- models ---------------------------------------
 DENSE_MODEL = "BAAI/bge-m3"
 DENSE_MODEL_FALLBACK = "intfloat/multilingual-e5-base"
+
+# Override with local path when HuggingFace is unreachable.
+# e.g. "/DATA/.../models/bge-m3"  — set to None to use hub IDs above.
+# Set to a local path when HuggingFace is unreachable (None = use hub IDs).
+DENSE_MODEL_LOCAL: str | None = "/DATA/air_force_object_detection/ml_challnege_26/models/bge-m3"
+RERANKER_MODEL_LOCAL: str | None = "/DATA/air_force_object_detection/ml_challnege_26/models/bge-reranker-v2-m3"
+
+# Set True to force the smaller fallback model (for smoke tests without bge-m3).
+USE_FALLBACK_DENSE: bool = False
 DENSE_DIM = 1024                 # bge-m3; e5-base = 768
 DENSE_MAX_TOKENS = 64
-DENSE_BATCH_SIZE = 128           # tune per GPU
+DENSE_BATCH_SIZE = 256           # A5000 24GB: 256 comfortable
 DENSE_FP16 = True
 
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 RERANK_MAX_TOKENS = 128
 RERANK_INFER_BATCH_SIZE = 128
+# Cascade: skip cross-encoder for pairs whose stage_a_score is outside
+# [LOW, HIGH]; use the stage_a_score as the rerank_score for those.
+# Big speedup with minimal quality loss on obvious matches/non-matches.
+RERANK_CASCADE_ENABLED: bool = True
+RERANK_CASCADE_LOW: float = 0.15
+RERANK_CASCADE_HIGH: float = 0.85
 RERANK_TRAIN_BATCH_SIZE = 32
 
 # ----------------------------- blocking (§4) --------------------------------

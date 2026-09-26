@@ -83,12 +83,14 @@ def _script_of(text: str) -> str:
     return counts.most_common(1)[0][0]
 
 
-def _has_postal(addr: str) -> bool:
-    return bool(addr) and bool(POSTAL_RE.search(addr))
+def _has_postal(addr) -> bool:
+    if not isinstance(addr, str) or not addr:
+        return False
+    return bool(POSTAL_RE.search(addr))
 
 
-def _has_house(addr: str) -> bool:
-    if not addr:
+def _has_house(addr) -> bool:
+    if not isinstance(addr, str) or not addr:
         return False
     return bool(HOUSE_LABEL_RE.search(addr) or LEADING_NUMBER_RE.search(addr))
 
