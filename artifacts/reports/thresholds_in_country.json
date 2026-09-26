@@ -1,10 +1,10 @@
 {
-  "pair_thresh": 0.85,
-  "singleton_thresh": 0.9,
-  "margin_thresh": 0.1,
-  "macro_f05_V": 0.05562224889955982,
+  "pair_thresh": 0.4,
+  "singleton_thresh": 0.45,
+  "margin_thresh": null,
+  "macro_f05_V": 0.05593395527950679,
   "singleton_f05_V": 1.0,
-  "nonsingleton_f05_V": 0.0,
-  "pred_singleton_rate": 1.0,
-  "mean_matches": 0.0
+  "nonsingleton_f05_V": 8.935202077261138e-05,
+  "pred_singleton_rate": 0.9996510816468946,
+  "mean_matches": 0.0003579811674717467
 }
