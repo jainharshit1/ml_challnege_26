@@ -1,1 +1,1 @@
-blocking_recall_V=0.0057  prefilter_recall_V=0.0055  loss=0.0001 (target < 0.005)
+blocking_recall_V=0.0000  prefilter_recall_V=0.0000  loss=0.0000 (target < 0.005)
