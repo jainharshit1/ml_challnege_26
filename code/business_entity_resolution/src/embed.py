@@ -32,6 +32,15 @@ def _load_encoder(model_name: str | None = None):
         else:
             model_name = C.DENSE_MODEL_LOCAL or C.DENSE_MODEL
     print(f"[embed] torch device: {C.torch_device()}  model: {model_name}")
+    # A5000/Ampere: enable TF32 for any fp32 fallback paths.
+    try:
+        import torch
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
     try:
         from FlagEmbedding import BGEM3FlagModel  # type: ignore
         m = BGEM3FlagModel(model_name, use_fp16=C.DENSE_FP16)

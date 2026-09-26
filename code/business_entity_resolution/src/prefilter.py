@@ -236,6 +236,8 @@ def write_candidate_pairs_tsv() -> Path:
     Every test S1 gets a row (empty string if the pipeline produced none).
     """
     test_s1 = read_source_tsv(C.TEST_SOURCE["s1"])
+    if C.NORMALIZE_ROW_CAP:
+        test_s1 = test_s1.iloc[:C.NORMALIZE_ROW_CAP].copy()
     all_s1 = test_s1["entity_id"].tolist()
     by_s1: dict[str, list[str]] = {sid: [] for sid in all_s1}
 

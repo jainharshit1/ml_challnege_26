@@ -42,8 +42,21 @@ def _load_reranker(prefer_finetuned: bool = True):
             model = model.half()
         except Exception:
             pass
+        # A5000/Ampere: TF32 for any fp32 fallbacks
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        except Exception:
+            pass
+        # Optional: torch.compile for 20-30% speedup (PyTorch 2+)
+        if getattr(C, "RERANK_TORCH_COMPILE", False) and hasattr(torch, "compile"):
+            try:
+                model = torch.compile(model, mode="reduce-overhead", fullgraph=False)
+                print("[reranker_infer] torch.compile enabled")
+            except Exception as e:
+                print(f"[reranker_infer] torch.compile skipped ({type(e).__name__})")
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def score(pairs: list[tuple[str, str]]) -> np.ndarray:
         if not pairs:
             return np.zeros(0, dtype=np.float32)

@@ -149,13 +149,20 @@ def _mine_unsupervised(names_by_country: dict[str, list[str]],
 # --- Orchestration ---------------------------------------------------------
 def build() -> dict:
     C.ensure_dirs()
-    print("[abbrev] loading sources + splits + GT…")
-    s1 = read_source_tsv(C.TRAIN_SOURCE["s1"])
-    s2 = read_source_tsv(C.TRAIN_SOURCE["s2"])
-    s3 = read_source_tsv(C.TRAIN_SOURCE["s3"])
-    ts1 = read_source_tsv(C.TEST_SOURCE["s1"])
-    ts2 = read_source_tsv(C.TEST_SOURCE["s2"])
-    ts3 = read_source_tsv(C.TEST_SOURCE["s3"])
+    cap = C.NORMALIZE_ROW_CAP or 0
+    def _load(path):
+        df = read_source_tsv(path)
+        return df.iloc[:cap].copy() if cap else df
+    if cap:
+        print(f"[abbrev] loading sources (capped to {cap:,} rows/source) + splits + GT…")
+    else:
+        print("[abbrev] loading sources + splits + GT…")
+    s1 = _load(C.TRAIN_SOURCE["s1"])
+    s2 = _load(C.TRAIN_SOURCE["s2"])
+    s3 = _load(C.TRAIN_SOURCE["s3"])
+    ts1 = _load(C.TEST_SOURCE["s1"])
+    ts2 = _load(C.TEST_SOURCE["s2"])
+    ts3 = _load(C.TEST_SOURCE["s3"])
     gt = read_ground_truth(C.TRAIN_GT)
     gt_long = explode_ground_truth(gt)
     split = splits_mod.load()
@@ -165,6 +172,14 @@ def build() -> dict:
 
     name_map = pd.concat([s1, s2, s3]).set_index("entity_id")["business_name"].fillna("").to_dict()
     addr_map = pd.concat([s1, s2, s3]).set_index("entity_id")["business_address"].fillna("").to_dict()
+
+    # Only keep pairs where BOTH ids are in our (possibly capped) name_map;
+    # otherwise mining iterates over empty tokens millions of times.
+    if cap:
+        _keys = set(name_map.keys())
+        before = len(pairs)
+        pairs = pairs[pairs["a"].isin(_keys) & pairs["b"].isin(_keys)].copy()
+        print(f"[abbrev] filtered pairs to those in capped subset: {before:,} -> {len(pairs):,}")
 
     print(f"[abbrev] mining name pairs from {len(pairs):,} R∪G positives…")
     name_pairs = _mine_from_pairs(name_map, name_map, pairs)

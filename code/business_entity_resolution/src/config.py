@@ -11,11 +11,11 @@ from pathlib import Path
 # 0.1  = fast dev; keeps candidate density identical by also downsampling
 #        the unmatched S2/S3 distractors by the same fraction.
 # ---------------------------------------------------------------------------
-SUBSAMPLE_FRACTION: float = 0.02
+SUBSAMPLE_FRACTION: float = 1.0
 
 # Set to a positive integer to cap rows per source during normalization for
 # smoke-test runs. None (or 0) = process all rows (production).
-NORMALIZE_ROW_CAP: int | None = 25_000
+NORMALIZE_ROW_CAP: int | None = None
 
 # GPU/CPU-heavy stage knobs (adjust based on hardware)
 # A5000 24GB defaults below
@@ -89,7 +89,7 @@ RERANKER_MODEL_LOCAL: str | None = "/DATA/air_force_object_detection/ml_challneg
 USE_FALLBACK_DENSE: bool = False
 DENSE_DIM = 1024                 # bge-m3; e5-base = 768
 DENSE_MAX_TOKENS = 64
-DENSE_BATCH_SIZE = 256           # A5000 24GB: 256 comfortable
+DENSE_BATCH_SIZE = 512           # A5000 24GB: compute-bound, 512 near-peak
 DENSE_FP16 = True
 
 RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
@@ -101,6 +101,9 @@ RERANK_INFER_BATCH_SIZE = 128
 RERANK_CASCADE_ENABLED: bool = True
 RERANK_CASCADE_LOW: float = 0.15
 RERANK_CASCADE_HIGH: float = 0.85
+# torch.compile() the reranker for 20-30% speedup on Ampere+; requires PyTorch >= 2.0.
+# Set to False if you hit a compile error; falls back to eager.
+RERANK_TORCH_COMPILE: bool = True
 RERANK_TRAIN_BATCH_SIZE = 32
 
 # ----------------------------- blocking (§4) --------------------------------

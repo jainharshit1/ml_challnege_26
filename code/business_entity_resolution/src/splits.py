@@ -26,8 +26,12 @@ def _bucket(n: int) -> str:
 
 def build() -> pd.DataFrame:
     C.ensure_dirs()
-    print("[splits] reading train_source1 + ground truth…")
+    cap = C.NORMALIZE_ROW_CAP or 0
+    print(f"[splits] reading train_source1 + ground truth…"
+          + (f" (capped to {cap:,} rows for smoke)" if cap else ""))
     s1 = read_source_tsv(C.TRAIN_SOURCE["s1"])[["entity_id", "country"]]
+    if cap:
+        s1 = s1.iloc[:cap].copy()
     gt = read_ground_truth(C.TRAIN_GT)
     gt["match_count"] = gt["matched_entity_ids"].apply(
         lambda x: 0 if not x or not x.strip() else len(

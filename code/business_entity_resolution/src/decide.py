@@ -98,6 +98,8 @@ def decide_all_test(
     country == 'France'. Everywhere else uses the main thresholds.
     """
     test_s1 = read_source_tsv(C.TEST_SOURCE["s1"])
+    if C.NORMALIZE_ROW_CAP:
+        test_s1 = test_s1.iloc[:C.NORMALIZE_ROW_CAP].copy()
     order = test_s1["entity_id"].tolist()
     country_of = dict(zip(test_s1["entity_id"], test_s1["country"]))
     by_s1: dict[str, list[tuple[str, float]]] = {sid: [] for sid in order}

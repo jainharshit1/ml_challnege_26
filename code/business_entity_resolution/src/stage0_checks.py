@@ -178,13 +178,24 @@ def _matches_split_by_source(gt: pd.DataFrame) -> dict[str, float]:
 
 def run() -> dict:
     C.ensure_dirs()
-    print("[stage0_checks] loading TSVs…")
-    train_s1 = read_source_tsv(C.TRAIN_SOURCE["s1"])
-    train_s2 = read_source_tsv(C.TRAIN_SOURCE["s2"])
-    train_s3 = read_source_tsv(C.TRAIN_SOURCE["s3"])
-    test_s1 = read_source_tsv(C.TEST_SOURCE["s1"])
-    test_s2 = read_source_tsv(C.TEST_SOURCE["s2"])
-    test_s3 = read_source_tsv(C.TEST_SOURCE["s3"])
+    if C.STAGE0_REPORT.exists() and (C.REPORTS_DIR / "stage0_report.json").exists():
+        print(f"[stage0_checks] cached: {C.STAGE0_REPORT} exists — skipping")
+        import json as _json
+        return _json.loads((C.REPORTS_DIR / "stage0_report.json").read_text("utf-8"))
+    cap = C.NORMALIZE_ROW_CAP or 0
+    def _load(path):
+        df = read_source_tsv(path)
+        return df.iloc[:cap].copy() if cap else df
+    if cap:
+        print(f"[stage0_checks] loading TSVs (capped to {cap:,} rows/source for smoke)…")
+    else:
+        print("[stage0_checks] loading TSVs…")
+    train_s1 = _load(C.TRAIN_SOURCE["s1"])
+    train_s2 = _load(C.TRAIN_SOURCE["s2"])
+    train_s3 = _load(C.TRAIN_SOURCE["s3"])
+    test_s1 = _load(C.TEST_SOURCE["s1"])
+    test_s2 = _load(C.TEST_SOURCE["s2"])
+    test_s3 = _load(C.TEST_SOURCE["s3"])
     gt = read_ground_truth(C.TRAIN_GT)
     gt_long = explode_ground_truth(gt)
 

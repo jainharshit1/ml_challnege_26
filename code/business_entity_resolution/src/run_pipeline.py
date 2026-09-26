@@ -94,7 +94,18 @@ def _run(stage: str) -> None:
 
     elif stage == "prefilter_score":
         from . import prefilter
-        prefilter.score_all()
+        from joblib import Parallel, delayed
+        countries = sorted({p.stem.split("__")[-1] for p in
+                            C.BLOCKING_DIR.glob("*__*.parquet")})
+        jobs = [(split, country) for split in ("train", "test") for country in countries
+                if (C.BLOCKING_DIR / f"{split}__{country}.parquet").exists()]
+        import os as _os
+        n_jobs = int(_os.environ.get("PREFILTER_JOBS", "3"))
+        n_jobs = min(len(jobs), max(1, n_jobs))
+        print(f"[prefilter_score] {len(jobs)} (split,country) jobs on {n_jobs} parallel workers")
+        Parallel(n_jobs=n_jobs, backend="loky", verbose=5)(
+            delayed(prefilter.score_partition)(s, c) for s, c in jobs
+        )
         prefilter.prefilter_recall_report()
         prefilter.write_candidate_pairs_tsv()
 

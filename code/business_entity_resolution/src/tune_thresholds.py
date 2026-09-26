@@ -166,6 +166,8 @@ def france_diagnostic(france_pair: float, france_singleton: float,
                       france_margin: float | None) -> dict:
     """Predicted singleton rate & mean matches for France test predictions."""
     test_s1 = read_source_tsv(C.TEST_SOURCE["s1"])
+    if C.NORMALIZE_ROW_CAP:
+        test_s1 = test_s1.iloc[:C.NORMALIZE_ROW_CAP].copy()
     fr_ids = set(test_s1.loc[test_s1["country"] == "France", "entity_id"])
     if not fr_ids:
         return {"n_france": 0}
