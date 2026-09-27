@@ -147,11 +147,23 @@ def france_procedure() -> dict:
     """Implement §8.4. Requires that both in-country and LOCO training have
     already been run and their thresholds tuned.
     """
-    inc = _read_or_none(C.REPORTS_DIR / "thresholds_in_country.json")
-    us = _read_or_none(C.REPORTS_DIR / "thresholds___loco_US.json")
-    ind = _read_or_none(C.REPORTS_DIR / "thresholds___loco_India.json")
+    inc_path = C.REPORTS_DIR / "thresholds_in_country.json"
+    inc = _read_or_none(inc_path)
     if inc is None:
         raise RuntimeError("Run tune() first (in-country).")
+
+    def _loco(name: str) -> dict | None:
+        # LOCO runs after in-country tuning; a LOCO file older than the
+        # current in-country thresholds is left over from an earlier run
+        # (e.g. loco stage skipped) and must not steer France.
+        p = C.REPORTS_DIR / name
+        if p.exists() and p.stat().st_mtime < inc_path.stat().st_mtime:
+            print(f"[france] ignoring stale {name} (older than in-country thresholds)")
+            return None
+        return _read_or_none(p)
+
+    us = _loco("thresholds___loco_US.json")
+    ind = _loco("thresholds___loco_India.json")
 
     france_pair = inc["pair_thresh"]
     france_singleton = inc["singleton_thresh"]

@@ -93,7 +93,11 @@ def train(loco_country: str | None = None) -> Path:
         params, dtr,
         num_boost_round=C.LGB_N_ESTIMATORS,
         valid_sets=[dva],
-        callbacks=[lgb.early_stopping(C.LGB_EARLY_STOP), lgb.log_evaluation(200)],
+        # Stop on logloss only (first metric): AUC saturates early and, with
+        # the default any-metric rule, would stop training long before the
+        # probabilities are calibrated -- and thresholds are tuned on them.
+        callbacks=[lgb.early_stopping(C.LGB_EARLY_STOP, first_metric_only=True),
+                   lgb.log_evaluation(100)],
     )
     tag = f"__loco_{loco_country}" if loco_country else ""
     model_path = C.MODELS_DIR / f"stage_b_lgbm{tag}.txt"
@@ -129,7 +133,7 @@ def score_all(loco_country: str | None = None) -> None:
         df = pd.read_parquet(p)
         X = df.drop(columns=["s1_id", "cand_id", "cand_source"]
                     + (["y"] if "y" in df.columns else [])
-                    ).reindex(columns=feat_names).fillna(-1.0).astype("float32")
+                    ).reindex(columns=feat_names).astype("float32")   # same NaN semantics as training
         p_hat = booster.predict(X.values)
         out = df[["s1_id", "cand_id", "cand_source"]].copy()
         out["p_match"] = p_hat.astype(np.float32)

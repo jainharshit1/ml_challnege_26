@@ -115,22 +115,35 @@ def _pairwise_feats(cands: pd.DataFrame,
     pool_lookup = {k: v.drop_duplicates("entity_id").set_index("entity_id")
                    for k, v in pool_maps.items()}
 
-    s1_ids_arr = cands["s1_id"].to_numpy()
     cand_ids_arr = cands["cand_id"].to_numpy()
     cand_src_arr = cands["cand_source"].to_numpy()
+    # Row positions into the lookup tables (-1 = absent). Strings are then
+    # materialised ONCE per table row and gathered by position, so each pair
+    # holds a pointer, not its own string copy (Arrow-backed pandas 3 strings
+    # would otherwise become n_pairs Python objects per column).
+    s_pos = s1_lookup.index.get_indexer(cands["s1_id"].to_numpy())
+    c_pos = np.full(n, -1, dtype=np.int64)
+    for src, pool_df in pool_lookup.items():
+        mask = cand_src_arr == src
+        if mask.any():
+            c_pos[mask] = pool_df.index.get_indexer(cand_ids_arr[mask])
+
+    def _table(series: pd.Series) -> np.ndarray:
+        return series.to_numpy(dtype=object, na_value="")
 
     def _s(col: str) -> np.ndarray:
-        return s1_lookup[col].reindex(s1_ids_arr).values
+        out = np.full(n, "", dtype=object)
+        ok = s_pos >= 0
+        out[ok] = _table(s1_lookup[col])[s_pos[ok]]
+        return out
 
     def _c(col: str) -> np.ndarray:
-        result = np.empty(n, dtype=object)
-        result[:] = ""
+        out = np.full(n, "", dtype=object)
         for src, pool_df in pool_lookup.items():
-            mask = (cand_src_arr == src)
-            if not mask.any():
-                continue
-            result[mask] = pool_df[col].reindex(cand_ids_arr[mask]).values
-        return result
+            mask = (cand_src_arr == src) & (c_pos >= 0)
+            if mask.any():
+                out[mask] = _table(pool_df[col])[c_pos[mask]]
+        return out
 
     def _str(a: np.ndarray) -> np.ndarray:
         return np.where(pd.isna(a), "", a).astype(object)
@@ -324,7 +337,10 @@ def score_partition(split: str, country: str, top_n: int = C.PREFILTER_TOP_N
     X = _cheap_features(cands, split, country)
     booster = _load_model()
     feat_names = (C.MODELS_DIR / "stage_a_features.txt").read_text(encoding="utf-8").split()
-    X = X.reindex(columns=feat_names).fillna(-1.0)
+    # No fillna: the model was trained with NaN for arms that did not fire
+    # (LightGBM routes missing values explicitly); filling here would send
+    # those rows down different branches than in training.
+    X = X.reindex(columns=feat_names)
     cands["stage_a_score"] = booster.predict(X)
     # top-N per S1
     cands = cands.sort_values(["s1_id", "stage_a_score"], ascending=[True, False])
