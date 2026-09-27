@@ -8,6 +8,9 @@ Training uses group G with labels from train GT; scoring runs on G, V and
 test.
 """
 from __future__ import annotations
+import os
+import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +25,37 @@ from .io_utils import (
     write_id_list_tsv,
     write_parquet,
 )
+
+
+HF_REPO = "jainsaabb/ml_challenge_2026_artifacts"
+
+
+def _upload_partition_async(local_path: Path, remote_prefix: str) -> None:
+    """Fire-and-forget upload — same pattern as blocking.py."""
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        return
+
+    def _do():
+        try:
+            os.environ["HF_HUB_OFFLINE"] = "0"
+            from huggingface_hub import upload_file
+            upload_file(
+                path_or_fileobj=str(local_path),
+                path_in_repo=f"{remote_prefix}/{local_path.name}",
+                repo_id=HF_REPO,
+                repo_type="dataset",
+                commit_message=f"partial: {remote_prefix}/{local_path.name}",
+                token=token,
+            )
+            print(f"[prefilter]   HF upload OK: {remote_prefix}/{local_path.name}",
+                  flush=True)
+        except Exception as e:
+            print(f"[prefilter]   HF upload FAILED "
+                  f"({type(e).__name__}: {e})", flush=True)
+
+    threading.Thread(target=_do, daemon=True,
+                     name=f"hfupload-{local_path.name}").start()
 
 
 # ---------------------------------------------------------------------------
@@ -63,49 +97,101 @@ def _char3_jaccard(a: str, b: str) -> float:
 def _pairwise_feats(cands: pd.DataFrame,
                     s1_map: pd.DataFrame,
                     pool_maps: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Compute Stage-A features on a candidate table (already partitioned)."""
-    rf = _rf()
+    """Vectorized Stage-A features.
+
+    Uses pd.Series.reindex (C-level hash lookup) to bulk-extract each column
+    once, then tight rapidfuzz loops for string sims. ~200x faster than the
+    per-row `.loc[]` version.
+    """
+    _rf()
     from rapidfuzz import fuzz as rf_fuzz  # type: ignore
     from rapidfuzz.distance import JaroWinkler  # type: ignore
 
-    cols_needed = ["entity_id", "core_name", "name_roman", "address_expanded",
-                   "postal_code", "house_number", "all_numbers",
-                   "locality_tokens", "core_name"]
+    n = len(cands)
+    if n == 0:
+        return pd.DataFrame()
 
     s1_lookup = s1_map.set_index("entity_id")
     pool_lookup = {k: v.set_index("entity_id") for k, v in pool_maps.items()}
 
-    def _row_feats(s1_id: str, cand_id: str, cand_source: str) -> dict:
-        s = s1_lookup.loc[s1_id]
-        p_src = pool_lookup[cand_source]
-        if cand_id not in p_src.index:
-            return {}
-        c = p_src.loc[cand_id]
+    s1_ids_arr = cands["s1_id"].to_numpy()
+    cand_ids_arr = cands["cand_id"].to_numpy()
+    cand_src_arr = cands["cand_source"].to_numpy()
 
-        s_name = s["core_name"] or s["name_roman"] or ""
-        c_name = c["core_name"] or c["name_roman"] or ""
-        s_addr = s["address_expanded"] or ""
-        c_addr = c["address_expanded"] or ""
+    def _s(col: str) -> np.ndarray:
+        return s1_lookup[col].reindex(s1_ids_arr).values
 
-        return {
-            "f_name_jw": JaroWinkler.normalized_similarity(s_name, c_name),
-            "f_name_sort": rf_fuzz.token_sort_ratio(s_name, c_name) / 100.0,
-            "f_name_set": rf_fuzz.token_set_ratio(s_name, c_name) / 100.0,
-            "f_name_char3": _char3_jaccard(s_name, c_name),
-            "f_addr_set": rf_fuzz.token_set_ratio(s_addr, c_addr) / 100.0,
-            "f_nums_jac": _jaccard(s["all_numbers"] or "", c["all_numbers"] or ""),
-            "f_house_eq": int(bool(s["house_number"])
-                              and s["house_number"] == c["house_number"]),
-            "f_postal_eq": int(bool(s["postal_code"])
-                                and s["postal_code"] == c["postal_code"]),
-            "f_loc_overlap": _jaccard(s["locality_tokens"] or "",
-                                        c["locality_tokens"] or ""),
-        }
+    def _c(col: str) -> np.ndarray:
+        result = np.empty(n, dtype=object)
+        result[:] = ""
+        for src, pool_df in pool_lookup.items():
+            mask = (cand_src_arr == src)
+            if not mask.any():
+                continue
+            result[mask] = pool_df[col].reindex(cand_ids_arr[mask]).values
+        return result
 
-    feats = [_row_feats(a, b, s) for a, b, s in
-             zip(cands["s1_id"], cands["cand_id"], cands["cand_source"])]
-    fdf = pd.DataFrame(feats).reindex(cands.index)
-    return fdf
+    def _str(a: np.ndarray) -> np.ndarray:
+        return np.where(pd.isna(a), "", a).astype(object)
+
+    print(f"[prefilter]   extracting columns for {n:,} pairs…", flush=True)
+    s_name_core = _str(_s("core_name"))
+    c_name_core = _str(_c("core_name"))
+    s_name_roman = _str(_s("name_roman"))
+    c_name_roman = _str(_c("name_roman"))
+    s_addr = _str(_s("address_expanded"))
+    c_addr = _str(_c("address_expanded"))
+    s_postal = _str(_s("postal_code"))
+    c_postal = _str(_c("postal_code"))
+    s_house = _str(_s("house_number"))
+    c_house = _str(_c("house_number"))
+    s_nums = _str(_s("all_numbers"))
+    c_nums = _str(_c("all_numbers"))
+    s_loc = _str(_s("locality_tokens"))
+    c_loc = _str(_c("locality_tokens"))
+
+    # Choose name: core preferred, fall back to roman
+    s_name = np.where(s_name_core != "", s_name_core, s_name_roman)
+    c_name = np.where(c_name_core != "", c_name_core, c_name_roman)
+    del s_name_core, c_name_core, s_name_roman, c_name_roman
+
+    print(f"[prefilter]   computing name sims…", flush=True)
+    f_name_jw = np.empty(n, dtype=np.float32)
+    f_name_sort = np.empty(n, dtype=np.float32)
+    f_name_set = np.empty(n, dtype=np.float32)
+    f_name_char3 = np.empty(n, dtype=np.float32)
+    f_addr_set = np.empty(n, dtype=np.float32)
+    f_nums_jac = np.empty(n, dtype=np.float32)
+    f_loc_overlap = np.empty(n, dtype=np.float32)
+
+    for i in range(n):
+        sn = s_name[i]
+        cn = c_name[i]
+        f_name_jw[i] = JaroWinkler.normalized_similarity(sn, cn)
+        f_name_sort[i] = rf_fuzz.token_sort_ratio(sn, cn) / 100.0
+        f_name_set[i] = rf_fuzz.token_set_ratio(sn, cn) / 100.0
+        f_name_char3[i] = _char3_jaccard(sn, cn)
+        f_addr_set[i] = rf_fuzz.token_set_ratio(s_addr[i], c_addr[i]) / 100.0
+        f_nums_jac[i] = _jaccard(s_nums[i], c_nums[i])
+        f_loc_overlap[i] = _jaccard(s_loc[i], c_loc[i])
+        if i and i % 500_000 == 0:
+            print(f"[prefilter]     {i:,}/{n:,}", flush=True)
+
+    # Vectorized equality features
+    f_house_eq = ((s_house == c_house) & (s_house != "")).astype(np.int8)
+    f_postal_eq = ((s_postal == c_postal) & (s_postal != "")).astype(np.int8)
+
+    return pd.DataFrame({
+        "f_name_jw": f_name_jw,
+        "f_name_sort": f_name_sort,
+        "f_name_set": f_name_set,
+        "f_name_char3": f_name_char3,
+        "f_addr_set": f_addr_set,
+        "f_nums_jac": f_nums_jac,
+        "f_house_eq": f_house_eq,
+        "f_postal_eq": f_postal_eq,
+        "f_loc_overlap": f_loc_overlap,
+    })
 
 
 def _cheap_features(cands: pd.DataFrame, split: str, country: str
@@ -214,7 +300,8 @@ def score_partition(split: str, country: str, top_n: int = C.PREFILTER_TOP_N
     out = C.PREFILTER_DIR / f"{split}__{country}.parquet"
     write_parquet(kept, out)
     print(f"[prefilter] {split}/{country}: kept {len(kept):,}/{len(cands):,} "
-          f"({kept['s1_id'].nunique():,} S1)")
+          f"({kept['s1_id'].nunique():,} S1)", flush=True)
+    _upload_partition_async(out, "prefilter")
     return kept
 
 

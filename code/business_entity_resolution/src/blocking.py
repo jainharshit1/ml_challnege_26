@@ -16,11 +16,19 @@ Output: artifacts/blocking/{split}__{country}.parquet
            dense_rank, name_tfidf_rank, addr_tfidf_rank,
            n_arms_hit]
 
-Every arm may return NaN for pairs it did not produce; scores + ranks are
-per-S1. Union is capped at UNION_TOP_N per S1 by (n_arms_hit desc, best
-normalized arm score).
+Optimised for a 32 GB RAM / 8 vCPU CPU-only box:
+  * FAISS add + search in batches so peak memory ≈ index_size + one batch,
+    never index_size + full-fp32-pool + full-fp32-query.
+  * Fully vectorized top-k extraction (no Python row loop).
+  * Sequential pool loading (S2 processed and freed before S3 is loaded).
+  * Flush-forced logging every ~1-2 minutes of wall time so progress is
+    visible in a redirected/tee'd log file.
 """
 from __future__ import annotations
+import gc
+import os
+import sys
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -35,49 +43,144 @@ from . import embed as embed_mod
 from .io_utils import write_parquet
 
 
+HF_REPO = "jainsaabb/ml_challenge_2026_artifacts"
+
+
+def _upload_partition_async(local_path: Path, remote_prefix: str) -> None:
+    """Fire-and-forget upload of a single parquet to HF Hub.
+
+    Runs in a daemon thread so the main pipeline doesn't wait for network I/O.
+    Silently swallows failures; per-stage bulk upload (via watcher_full.sh)
+    is the safety net.
+    """
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        return
+
+    def _do():
+        try:
+            os.environ["HF_HUB_OFFLINE"] = "0"
+            from huggingface_hub import upload_file
+            upload_file(
+                path_or_fileobj=str(local_path),
+                path_in_repo=f"{remote_prefix}/{local_path.name}",
+                repo_id=HF_REPO,
+                repo_type="dataset",
+                commit_message=f"partial: {remote_prefix}/{local_path.name}",
+                token=token,
+            )
+            _log(
+                f"[blocking]   HF upload OK: {remote_prefix}/{local_path.name}")
+        except Exception as e:
+            _log(f"[blocking]   HF upload FAILED ({type(e).__name__}: {e}) "
+                 f"— watcher will retry at stage end")
+
+    t = threading.Thread(target=_do, daemon=True,
+                         name=f"hfupload-{local_path.name}")
+    t.start()
+
+
+ARM_COLS = [
+    "s1_id", "cand_id", "cand_source",
+    "dense_score", "name_tfidf_score", "addr_tfidf_score",
+    "key_locrare_hit", "key_house_hit", "key_acr_hit",
+    "dense_rank", "name_tfidf_rank", "addr_tfidf_rank",
+]
+
+
+def _log(msg: str) -> None:
+    """Force-flushed print so buffered stdout doesn't hide progress."""
+    print(msg, flush=True)
+    sys.stdout.flush()
+
+
 # ---------------------------------------------------------------------------
-# Dense arm (A1)
+# Dense arm (A1) — memory-bounded FAISS
 # ---------------------------------------------------------------------------
 def _dense_knn(query_vecs: np.ndarray, pool_vecs: np.ndarray,
                k: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return (scores [N,k], indices [N,k]) using FAISS if available."""
+    """Return (scores [N,k], indices [N,k]).
+
+    Uses FAISS with batched fp32 conversion so peak memory ≈ index storage
+    plus one batch (fp32) rather than the whole pool converted at once.
+    """
     try:
         import faiss  # type: ignore
     except Exception as e:
-        raise RuntimeError("faiss is required for the dense blocking arm") from e
+        raise RuntimeError(
+            "faiss is required for the dense blocking arm") from e
 
-    n_pool = pool_vecs.shape[0]
-    d = pool_vecs.shape[1]
-    pool = np.ascontiguousarray(pool_vecs.astype(np.float32))
-    query = np.ascontiguousarray(query_vecs.astype(np.float32))
+    # Let FAISS use all available cores
+    try:
+        faiss.omp_set_num_threads(C.N_JOBS)
+    except Exception:
+        pass
 
+    n_pool = int(pool_vecs.shape[0])
+    n_q = int(query_vecs.shape[0])
+    d = int(pool_vecs.shape[1])
+
+    # ---- Build index ----
     if n_pool <= C.FAISS_FLAT_MAX:
         index = faiss.IndexFlatIP(d)
-        index.add(pool)
+        idx_kind = "Flat"
     else:
         quantizer = faiss.IndexFlatIP(d)
         nlist = min(C.FAISS_NLIST, max(64, int(np.sqrt(n_pool) * 4)))
-        index = faiss.IndexIVFFlat(quantizer, d, nlist, faiss.METRIC_INNER_PRODUCT)
+        index = faiss.IndexIVFFlat(quantizer, d, nlist,
+                                   faiss.METRIC_INNER_PRODUCT)
         rng = np.random.default_rng(C.SEED)
         train_n = min(C.FAISS_TRAIN_SAMPLE, n_pool)
         train_idx = rng.choice(n_pool, size=train_n, replace=False)
-        index.train(pool[train_idx])
-        index.add(pool)
+        # Copy just the training sample to fp32 (much smaller than full pool)
+        train_sample = np.ascontiguousarray(
+            pool_vecs[train_idx], dtype=np.float32)
+        _log(
+            f"[blocking]   FAISS IVF train: nlist={nlist}  sample={train_n:,}")
+        index.train(train_sample)
+        del train_sample
+        gc.collect()
         index.nprobe = C.FAISS_NPROBE_DEFAULT
+        idx_kind = f"IVFFlat(nlist={nlist}, nprobe={index.nprobe})"
 
-    # move to GPU if available
-    used_gpu = False
+    _log(
+        f"[blocking]   FAISS index kind: {idx_kind}  d={d}  n_pool={n_pool:,}")
+
+    # ---- Batched add ----
+    ADD_BATCH = 200_000
+    added = 0
+    for start in range(0, n_pool, ADD_BATCH):
+        end = min(start + ADD_BATCH, n_pool)
+        chunk = np.ascontiguousarray(pool_vecs[start:end], dtype=np.float32)
+        index.add(chunk)
+        added += end - start
+        del chunk
+        if (start // ADD_BATCH) % 5 == 0 or end == n_pool:
+            _log(f"[blocking]   FAISS add: {added:,}/{n_pool:,}")
+    gc.collect()
+
+    # ---- Batched search ----
+    D_all = np.zeros((n_q, k), dtype=np.float32)
+    I_all = np.full((n_q, k), -1, dtype=np.int64)
+    Q_BATCH = 100_000
+    searched = 0
+    for start in range(0, n_q, Q_BATCH):
+        end = min(start + Q_BATCH, n_q)
+        chunk = np.ascontiguousarray(query_vecs[start:end], dtype=np.float32)
+        D_all[start:end], I_all[start:end] = index.search(chunk, k)
+        searched += end - start
+        del chunk
+        if (start // Q_BATCH) % 3 == 0 or end == n_q:
+            _log(f"[blocking]   FAISS search: {searched:,}/{n_q:,}")
+
+    # Explicit cleanup — reset the index to release its internal buffers
     try:
-        res = faiss.StandardGpuResources()
-        index = faiss.index_cpu_to_gpu(res, 0, index)
-        used_gpu = True
+        index.reset()
     except Exception:
         pass
-    print(f"[blocking]   FAISS device: {'gpu' if used_gpu else 'cpu'}  "
-          f"pool={n_pool:,}  k={k}")
-
-    D, I = index.search(query, k)
-    return D, I
+    del index
+    gc.collect()
+    return D_all, I_all
 
 
 # ---------------------------------------------------------------------------
@@ -99,34 +202,40 @@ def _sparse_topk(mat_q: sp.csr_matrix, mat_p: sp.csr_matrix,
                  ) -> tuple[np.ndarray, np.ndarray]:
     """Cosine top-k of q rows against p rows (both L2-normalised).
 
-    Uses sparse_dot_topn when available; otherwise chunked matmul (slower
-    but zero-dep).
+    Uses sparse_dot_topn when available. Vectorized extraction (no Python
+    per-row loop) via np.repeat + cumsum on the CSR indptr.
     """
+    n_q = mat_q.shape[0]
+    D = np.zeros((n_q, k), dtype=np.float32)
+    I = np.full((n_q, k), -1, dtype=np.int64)
     try:
         from sparse_dot_topn import sp_matmul_topn  # type: ignore
         pT = mat_p.T.tocsr()
-        out = sp_matmul_topn(mat_q, pT, top_n=k, threshold=0.0, sort=True)
-        # convert to dense k arrays
-        n = mat_q.shape[0]
-        D = np.zeros((n, k), dtype=np.float32)
-        I = -np.ones((n, k), dtype=np.int64)
-        for i in range(n):
-            row = out.getrow(i)
-            cols = row.indices
-            vals = row.data
-            order = np.argsort(-vals)[:k]
-            D[i, : len(order)] = vals[order]
-            I[i, : len(order)] = cols[order]
+        out = sp_matmul_topn(mat_q, pT, top_n=k, threshold=0.20,
+                             n_threads=C.N_JOBS, sort=True).tocsr()
+
+        indptr = out.indptr
+        row_lens = np.diff(indptr)                       # entries per row
+        total = int(row_lens.sum())
+        if total == 0:
+            return D, I
+
+        # Flat row assignment via np.repeat (C-level, fast)
+        row_ids = np.repeat(np.arange(n_q, dtype=np.int64), row_lens)
+        # Position within row: (position in flat data) - (start of that row)
+        starts = indptr[:-1].astype(np.int64)
+        positions = np.arange(total, dtype=np.int64) - starts.repeat(row_lens)
+
+        D[row_ids, positions] = out.data
+        I[row_ids, positions] = out.indices
         return D, I
-    except Exception:
+    except Exception as e:
+        _log(f"[blocking]   sparse_dot_topn unavailable ({type(e).__name__}); "
+             "falling back to chunked matmul")
         pT = mat_p.T
-        n_q = mat_q.shape[0]
-        D = np.zeros((n_q, k), dtype=np.float32)
-        I = -np.ones((n_q, k), dtype=np.int64)
         for start in range(0, n_q, row_batch):
             end = min(start + row_batch, n_q)
-            sim = mat_q[start:end] @ pT
-            sim = sim.toarray()
+            sim = (mat_q[start:end] @ pT).toarray()
             top_idx = np.argpartition(-sim, kth=min(k, sim.shape[1] - 1),
                                       axis=1)[:, :k]
             for r_local in range(sim.shape[0]):
@@ -149,30 +258,32 @@ def _split_toks(x: str | None) -> list[str]:
 
 def _key_arm(s1_df: pd.DataFrame, pool_df: pd.DataFrame,
              s1_keys_fn, pool_keys_fn,
-             cap: int) -> list[tuple[int, int]]:
-    """Return list of (query_idx, pool_idx) pairs whose keys intersect.
-
-    query_idx/pool_idx are positional; the caller maps back to entity ids.
-    Keys are produced by *_keys_fn(row) → Iterable[str]. Any key producing
-    more than `cap` pool matches is dropped.
-    """
+             cap: int) -> tuple[np.ndarray, np.ndarray, int]:
+    """Return (query_idx_arr, pool_idx_arr, dropped_key_count) as numpy arrays."""
     pool_index: dict[str, list[int]] = defaultdict(list)
     for j, row in enumerate(pool_df.itertuples(index=False)):
         for k in pool_keys_fn(row):
             pool_index[k].append(j)
-    # drop over-cap keys
     kept = {k: v for k, v in pool_index.items() if 0 < len(v) <= cap}
     dropped = len(pool_index) - len(kept)
+    del pool_index
+    gc.collect()
 
-    pairs: list[tuple[int, int]] = []
+    q_arr: list[int] = []
+    p_arr: list[int] = []
     for i, row in enumerate(s1_df.itertuples(index=False)):
         seen = set()
         for k in s1_keys_fn(row):
             for j in kept.get(k, ()):
                 if j not in seen:
                     seen.add(j)
-                    pairs.append((i, j))
-    return pairs, dropped
+                    q_arr.append(i)
+                    p_arr.append(j)
+    del kept
+    gc.collect()
+    return (np.array(q_arr, dtype=np.int64),
+            np.array(p_arr, dtype=np.int64),
+            dropped)
 
 
 def _s1_keys_locrare(row):
@@ -223,194 +334,289 @@ def _pool_keys_acr(row):
 
 
 # ---------------------------------------------------------------------------
+# Vectorized per-arm record builders
+# ---------------------------------------------------------------------------
+def _empty_arm_df(n: int) -> dict:
+    """Dict of NaN/zero arrays for the non-key numeric columns."""
+    return {
+        "dense_score": np.full(n, np.nan, dtype=np.float32),
+        "name_tfidf_score": np.full(n, np.nan, dtype=np.float32),
+        "addr_tfidf_score": np.full(n, np.nan, dtype=np.float32),
+        "key_locrare_hit": np.zeros(n, dtype=np.int8),
+        "key_house_hit": np.zeros(n, dtype=np.int8),
+        "key_acr_hit": np.zeros(n, dtype=np.int8),
+        "dense_rank": np.full(n, np.nan, dtype=np.float32),
+        "name_tfidf_rank": np.full(n, np.nan, dtype=np.float32),
+        "addr_tfidf_rank": np.full(n, np.nan, dtype=np.float32),
+    }
+
+
+def _rows_from_topk(D: np.ndarray, I: np.ndarray,
+                    s1_ids_arr: np.ndarray, pool_ids_arr: np.ndarray,
+                    src_tag: str,
+                    score_col: str, rank_col: str,
+                    drop_zero_score: bool) -> pd.DataFrame:
+    n_s1, K = I.shape
+    ranks = np.broadcast_to(np.arange(K, dtype=np.int32), (n_s1, K))
+    s1_bc = np.broadcast_to(s1_ids_arr.reshape(-1, 1), (n_s1, K))
+
+    valid = I >= 0
+    if drop_zero_score:
+        valid = valid & (D > 0)
+    v = valid.ravel()
+    n = int(v.sum())
+    if n == 0:
+        return pd.DataFrame(columns=ARM_COLS)
+
+    cols = _empty_arm_df(n)
+    cols[score_col] = D.ravel()[v].astype(np.float32)
+    cols[rank_col] = ranks.ravel()[v].astype(np.float32)
+    df = pd.DataFrame({
+        "s1_id": s1_bc.ravel()[v],
+        "cand_id": pool_ids_arr[I.ravel()[v]],
+        "cand_source": src_tag,
+        **cols,
+    })
+    return df
+
+
+def _rows_from_key_arm(q_arr: np.ndarray, p_arr: np.ndarray,
+                       s1_ids_arr: np.ndarray, pool_ids_arr: np.ndarray,
+                       src_tag: str,
+                       key_col: str) -> pd.DataFrame:
+    n = int(q_arr.shape[0])
+    if n == 0:
+        return pd.DataFrame(columns=ARM_COLS)
+    cols = _empty_arm_df(n)
+    cols[key_col] = np.ones(n, dtype=np.int8)
+    df = pd.DataFrame({
+        "s1_id": s1_ids_arr[q_arr],
+        "cand_id": pool_ids_arr[p_arr],
+        "cand_source": src_tag,
+        **cols,
+    })
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Union + top-N cap
 # ---------------------------------------------------------------------------
-def _union_and_cap(records: list[dict], top_n: int) -> pd.DataFrame:
-    if not records:
-        return pd.DataFrame(columns=[
-            "s1_id", "cand_id", "cand_source",
-            "dense_score", "name_tfidf_score", "addr_tfidf_score",
-            "key_locrare_hit", "key_house_hit", "key_acr_hit",
-            "dense_rank", "name_tfidf_rank", "addr_tfidf_rank",
-            "n_arms_hit",
-        ])
-    df = pd.DataFrame(records)
-    # collapse duplicate (s1_id, cand_id, cand_source) triples across arms
+def _union_and_cap(df: pd.DataFrame, top_n: int) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=ARM_COLS + ["n_arms_hit"])
+
+    _log(f"[blocking]   union: aggregating {len(df):,} arm records…")
     agg = {
         "dense_score": "max", "name_tfidf_score": "max", "addr_tfidf_score": "max",
         "key_locrare_hit": "max", "key_house_hit": "max", "key_acr_hit": "max",
         "dense_rank": "min", "name_tfidf_rank": "min", "addr_tfidf_rank": "min",
     }
-    df = df.groupby(["s1_id", "cand_id", "cand_source"], as_index=False).agg(agg)
-    # arm indicator: score non-null OR key hit
-    arm_cols = [
-        "dense_score", "name_tfidf_score", "addr_tfidf_score",
-        "key_locrare_hit", "key_house_hit", "key_acr_hit",
-    ]
-    hits = df[arm_cols].notna().astype(int)
-    for k in ("key_locrare_hit", "key_house_hit", "key_acr_hit"):
-        hits[k] = df[k].fillna(0).astype(int)
-    df["n_arms_hit"] = hits.sum(axis=1)
-    # rank by (n_arms_hit desc, best normalized score desc)
-    df["_best"] = df[["dense_score", "name_tfidf_score", "addr_tfidf_score"]
-                     ].max(axis=1).fillna(0)
-    df = df.sort_values(["s1_id", "n_arms_hit", "_best"],
-                         ascending=[True, False, False])
-    df = df.groupby("s1_id", as_index=False).head(top_n).drop(columns="_best")
-    return df.reset_index(drop=True)
+    df = df.groupby(["s1_id", "cand_id", "cand_source"], as_index=False,
+                    sort=False).agg(agg)
+    _log(f"[blocking]   union: {len(df):,} unique pairs after collapse")
+
+    score_hit = df[["dense_score", "name_tfidf_score",
+                    "addr_tfidf_score"]].notna().sum(axis=1)
+    key_hit = (df[["key_locrare_hit", "key_house_hit", "key_acr_hit"]]
+               .fillna(0).astype(np.int8).sum(axis=1))
+    df["n_arms_hit"] = (score_hit + key_hit).astype(np.int8)
+
+    best = df[["dense_score", "name_tfidf_score", "addr_tfidf_score"]
+              ].max(axis=1).fillna(0.0)
+    df = df.assign(_best=best).sort_values(
+        ["s1_id", "n_arms_hit", "_best"],
+        ascending=[True, False, False])
+    df = df.groupby("s1_id", as_index=False, sort=False).head(top_n)
+    df = df.drop(columns="_best").reset_index(drop=True)
+    _log(f"[blocking]   union: {len(df):,} pairs after top-{top_n}-per-S1 cap")
+    return df
 
 
 # ---------------------------------------------------------------------------
 # Per-partition driver
 # ---------------------------------------------------------------------------
+KEEP_COLS = [
+    "entity_id", "core_name", "name_roman", "address_expanded",
+    "locality_tokens", "postal_code", "postal_prefix3",
+    "house_number", "street_tokens", "acronym",
+]
+
+
+def _process_pool(split: str, country: str, src_tag: str,
+                  s1: pd.DataFrame, s1_ids_arr: np.ndarray,
+                  pool_path: Path) -> list[pd.DataFrame]:
+    """Run all six arms for a single pool (S2 or S3). Returns arm frames."""
+    pool = pd.read_parquet(pool_path, columns=KEEP_COLS)
+    pool_ids_arr = pool["entity_id"].to_numpy()
+    _log(f"[blocking] {split}/{country} vs {src_tag}: "
+         f"{len(s1_ids_arr):,} × {len(pool_ids_arr):,}")
+
+    frames: list[pd.DataFrame] = []
+
+    # ---- A1 dense ----
+    try:
+        _log(f"[blocking]   A1 dense: loading embeddings…")
+        q_vec, _ = embed_mod.load_embeddings(split, "s1", country)
+        p_vec, _ = embed_mod.load_embeddings(split, src_tag.lower(), country)
+        D, I = _dense_knn(np.asarray(q_vec), np.asarray(p_vec), C.K_DENSE)
+        df_a1 = _rows_from_topk(D, I, s1_ids_arr, pool_ids_arr, src_tag,
+                                score_col="dense_score",
+                                rank_col="dense_rank",
+                                drop_zero_score=False)
+        _log(f"[blocking]   A1 dense: {len(df_a1):,} rows")
+        frames.append(df_a1)
+        del D, I, q_vec, p_vec, df_a1
+        gc.collect()
+    except Exception as e:
+        _log(
+            f"[blocking] A1 dense skipped ({type(e).__name__}: {e}); continuing")
+
+    # ---- A2 name TF-IDF ----
+    _log(f"[blocking]   A2 name TF-IDF: fitting…")
+    name_texts_pool = pool["core_name"].fillna("").tolist()
+    name_texts_q = s1["core_name"].fillna("").tolist()
+    vec_name = _fit_tfidf(name_texts_pool + name_texts_q)
+    mat_p = vec_name.transform(name_texts_pool)
+    mat_q = vec_name.transform(name_texts_q)
+    del name_texts_pool, name_texts_q, vec_name
+    gc.collect()
+    _log(
+        f"[blocking]   A2 name TF-IDF: top-k on q{mat_q.shape} p{mat_p.shape}…")
+    D, I = _sparse_topk(mat_q, mat_p, C.K_NAME_TFIDF)
+    del mat_p, mat_q
+    gc.collect()
+    df_a2 = _rows_from_topk(D, I, s1_ids_arr, pool_ids_arr, src_tag,
+                            score_col="name_tfidf_score",
+                            rank_col="name_tfidf_rank",
+                            drop_zero_score=True)
+    _log(f"[blocking]   A2 name TF-IDF: {len(df_a2):,} rows")
+    frames.append(df_a2)
+    del D, I, df_a2
+    gc.collect()
+
+    # ---- A3 address TF-IDF ----
+    _log(f"[blocking]   A3 addr TF-IDF: fitting…")
+    addr_texts_pool = pool["address_expanded"].fillna("").tolist()
+    addr_texts_q = s1["address_expanded"].fillna("").tolist()
+    vec_addr = _fit_tfidf(addr_texts_pool + addr_texts_q)
+    mat_p = vec_addr.transform(addr_texts_pool)
+    mat_q = vec_addr.transform(addr_texts_q)
+    del addr_texts_pool, addr_texts_q, vec_addr
+    gc.collect()
+    _log(
+        f"[blocking]   A3 addr TF-IDF: top-k on q{mat_q.shape} p{mat_p.shape}…")
+    D, I = _sparse_topk(mat_q, mat_p, C.K_ADDR_TFIDF)
+    del mat_p, mat_q
+    gc.collect()
+    df_a3 = _rows_from_topk(D, I, s1_ids_arr, pool_ids_arr, src_tag,
+                            score_col="addr_tfidf_score",
+                            rank_col="addr_tfidf_rank",
+                            drop_zero_score=True)
+    _log(f"[blocking]   A3 addr TF-IDF: {len(df_a3):,} rows")
+    frames.append(df_a3)
+    del D, I, df_a3
+    gc.collect()
+
+    # ---- A4 (rare-token, locality|postal) ----
+    _log(f"[blocking]   A4 key locrare: indexing…")
+    q_arr, p_arr, dropped = _key_arm(s1, pool, _s1_keys_locrare,
+                                     _pool_keys_locrare, C.KEY_BLOCK_CAP)
+    _log(f"[blocking]   A4 pairs={len(q_arr):,} dropped-keys={dropped}")
+    frames.append(_rows_from_key_arm(q_arr, p_arr, s1_ids_arr, pool_ids_arr,
+                                     src_tag, "key_locrare_hit"))
+    del q_arr, p_arr
+    gc.collect()
+
+    # ---- A5 (house_number, street_token) ----
+    _log(f"[blocking]   A5 key house: indexing…")
+    q_arr, p_arr, dropped = _key_arm(s1, pool, _s1_keys_house,
+                                     _pool_keys_house, C.KEY_BLOCK_CAP)
+    _log(f"[blocking]   A5 pairs={len(q_arr):,} dropped-keys={dropped}")
+    frames.append(_rows_from_key_arm(q_arr, p_arr, s1_ids_arr, pool_ids_arr,
+                                     src_tag, "key_house_hit"))
+    del q_arr, p_arr
+    gc.collect()
+
+    # ---- A6 (acronym, postal_prefix3|locality) ----
+    _log(f"[blocking]   A6 key acr: indexing…")
+    q_arr, p_arr, dropped = _key_arm(s1, pool, _s1_keys_acr,
+                                     _pool_keys_acr, C.KEY_ACRONYM_CAP)
+    _log(f"[blocking]   A6 pairs={len(q_arr):,} dropped-keys={dropped}")
+    frames.append(_rows_from_key_arm(q_arr, p_arr, s1_ids_arr, pool_ids_arr,
+                                     src_tag, "key_acr_hit"))
+    del q_arr, p_arr, pool
+    gc.collect()
+
+    return frames
+
+
 def block_partition(split: str, country: str) -> pd.DataFrame:
     """Run the six arms for one (split, country) partition and write results."""
     C.ensure_dirs()
     out_path = C.BLOCKING_DIR / f"{split}__{country}.parquet"
     if out_path.exists():
-        print(f"[blocking] cached: {out_path}")
+        _log(f"[blocking] cached: {out_path}")
         return pd.read_parquet(out_path)
 
     s1_path = C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet"
     s2_path = C.NORMALIZED_DIR / f"{split}__s2__{country}.parquet"
     s3_path = C.NORMALIZED_DIR / f"{split}__s3__{country}.parquet"
     if not s1_path.exists():
-        print(f"[blocking] no S1 for {split}/{country} — skipping")
+        _log(f"[blocking] no S1 for {split}/{country} — skipping")
         return pd.DataFrame()
 
-    keep_cols = [
-        "entity_id", "core_name", "name_roman", "address_expanded",
-        "locality_tokens", "postal_code", "postal_prefix3",
-        "house_number", "street_tokens", "acronym",
-    ]
-    s1 = pd.read_parquet(s1_path, columns=keep_cols)
-    s1_ids = s1["entity_id"].tolist()
-    pools: dict[str, pd.DataFrame] = {}
-    if s2_path.exists():
-        pools["S2"] = pd.read_parquet(s2_path, columns=keep_cols)
-    if s3_path.exists():
-        pools["S3"] = pd.read_parquet(s3_path, columns=keep_cols)
+    s1 = pd.read_parquet(s1_path, columns=KEEP_COLS)
 
-    all_records: list[dict] = []
-    for src_tag, pool in pools.items():
-        pool_ids = pool["entity_id"].tolist()
-        print(f"[blocking] {split}/{country} vs {src_tag}: "
-              f"{len(s1_ids):,} × {len(pool_ids):,}")
+    # NEW: Drop "unused" rows from S1 for the train split to cut work by 50%
+    if split == "train":
+        from . import splits as splits_mod
+        split_df = splits_mod.load()
+        valid_ids = set(
+            split_df.loc[split_df["group"].isin(["G", "V", "R"]), "entity_id"])
+        s1 = s1[s1["entity_id"].isin(valid_ids)].reset_index(drop=True)
 
-        # ---- A1 dense ----
-        try:
-            q_vec, _ = embed_mod.load_embeddings(split, "s1", country)
-            p_vec, _ = embed_mod.load_embeddings(split, src_tag.lower(), country)
-            D, I = _dense_knn(np.asarray(q_vec), np.asarray(p_vec), C.K_DENSE)
-            for i in range(len(s1_ids)):
-                for rk, (score, j) in enumerate(zip(D[i], I[i])):
-                    if j < 0:
-                        continue
-                    all_records.append({
-                        "s1_id": s1_ids[i],
-                        "cand_id": pool_ids[j],
-                        "cand_source": src_tag,
-                        "dense_score": float(score),
-                        "name_tfidf_score": np.nan,
-                        "addr_tfidf_score": np.nan,
-                        "key_locrare_hit": 0,
-                        "key_house_hit": 0,
-                        "key_acr_hit": 0,
-                        "dense_rank": rk,
-                        "name_tfidf_rank": np.nan,
-                        "addr_tfidf_rank": np.nan,
-                    })
-        except Exception as e:
-            print(f"[blocking] A1 dense skipped ({e}); continuing without it")
+    s1_ids_arr = s1["entity_id"].to_numpy()
+    _log(f"[blocking] === {split}/{country}: {len(s1_ids_arr):,} S1 rows ===")
 
-        # ---- A2 name TF-IDF ----
-        name_texts_pool = pool["core_name"].fillna("").tolist()
-        name_texts_q = s1["core_name"].fillna("").tolist()
-        vec_name = _fit_tfidf(name_texts_pool + name_texts_q)
-        mat_p = vec_name.transform(name_texts_pool)
-        mat_q = vec_name.transform(name_texts_q)
-        D, I = _sparse_topk(mat_q, mat_p, C.K_NAME_TFIDF)
-        for i in range(len(s1_ids)):
-            for rk, (score, j) in enumerate(zip(D[i], I[i])):
-                if j < 0 or score <= 0:
-                    continue
-                all_records.append({
-                    "s1_id": s1_ids[i], "cand_id": pool_ids[j], "cand_source": src_tag,
-                    "dense_score": np.nan, "name_tfidf_score": float(score),
-                    "addr_tfidf_score": np.nan,
-                    "key_locrare_hit": 0, "key_house_hit": 0, "key_acr_hit": 0,
-                    "dense_rank": np.nan, "name_tfidf_rank": rk, "addr_tfidf_rank": np.nan,
-                })
+    all_frames: list[pd.DataFrame] = []
 
-        # ---- A3 address TF-IDF ----
-        addr_texts_pool = pool["address_expanded"].fillna("").tolist()
-        addr_texts_q = s1["address_expanded"].fillna("").tolist()
-        vec_addr = _fit_tfidf(addr_texts_pool + addr_texts_q)
-        mat_p = vec_addr.transform(addr_texts_pool)
-        mat_q = vec_addr.transform(addr_texts_q)
-        D, I = _sparse_topk(mat_q, mat_p, C.K_ADDR_TFIDF)
-        for i in range(len(s1_ids)):
-            for rk, (score, j) in enumerate(zip(D[i], I[i])):
-                if j < 0 or score <= 0:
-                    continue
-                all_records.append({
-                    "s1_id": s1_ids[i], "cand_id": pool_ids[j], "cand_source": src_tag,
-                    "dense_score": np.nan, "name_tfidf_score": np.nan,
-                    "addr_tfidf_score": float(score),
-                    "key_locrare_hit": 0, "key_house_hit": 0, "key_acr_hit": 0,
-                    "dense_rank": np.nan, "name_tfidf_rank": np.nan, "addr_tfidf_rank": rk,
-                })
+    for src_tag, pool_path in (("S2", s2_path), ("S3", s3_path)):
+        if not pool_path.exists():
+            continue
+        frames = _process_pool(split, country, src_tag,
+                               s1, s1_ids_arr, pool_path)
+        all_frames.extend(frames)
+        del frames
+        gc.collect()
 
-        # ---- A4 (rare-token, locality|postal) ----
-        pairs, dropped = _key_arm(s1, pool, _s1_keys_locrare, _pool_keys_locrare,
-                                   C.KEY_BLOCK_CAP)
-        print(f"[blocking]   A4 pairs={len(pairs):,} dropped-keys={dropped}")
-        for i, j in pairs:
-            all_records.append({
-                "s1_id": s1_ids[i], "cand_id": pool_ids[j], "cand_source": src_tag,
-                "dense_score": np.nan, "name_tfidf_score": np.nan,
-                "addr_tfidf_score": np.nan,
-                "key_locrare_hit": 1, "key_house_hit": 0, "key_acr_hit": 0,
-                "dense_rank": np.nan, "name_tfidf_rank": np.nan, "addr_tfidf_rank": np.nan,
-            })
+    del s1
+    gc.collect()
 
-        # ---- A5 (house_number, street_token) ----
-        pairs, dropped = _key_arm(s1, pool, _s1_keys_house, _pool_keys_house,
-                                   C.KEY_BLOCK_CAP)
-        print(f"[blocking]   A5 pairs={len(pairs):,} dropped-keys={dropped}")
-        for i, j in pairs:
-            all_records.append({
-                "s1_id": s1_ids[i], "cand_id": pool_ids[j], "cand_source": src_tag,
-                "dense_score": np.nan, "name_tfidf_score": np.nan,
-                "addr_tfidf_score": np.nan,
-                "key_locrare_hit": 0, "key_house_hit": 1, "key_acr_hit": 0,
-                "dense_rank": np.nan, "name_tfidf_rank": np.nan, "addr_tfidf_rank": np.nan,
-            })
+    _log(f"[blocking] {split}/{country}: concatenating "
+         f"{len(all_frames)} arm frames…")
+    big = pd.concat(all_frames, ignore_index=True, copy=False)
+    all_frames.clear()
+    del all_frames
+    gc.collect()
+    _log(f"[blocking] {split}/{country}: total pre-union {len(big):,} rows "
+         f"({big.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
 
-        # ---- A6 (acronym, postal_prefix3|locality) ----
-        pairs, dropped = _key_arm(s1, pool, _s1_keys_acr, _pool_keys_acr,
-                                   C.KEY_ACRONYM_CAP)
-        print(f"[blocking]   A6 pairs={len(pairs):,} dropped-keys={dropped}")
-        for i, j in pairs:
-            all_records.append({
-                "s1_id": s1_ids[i], "cand_id": pool_ids[j], "cand_source": src_tag,
-                "dense_score": np.nan, "name_tfidf_score": np.nan,
-                "addr_tfidf_score": np.nan,
-                "key_locrare_hit": 0, "key_house_hit": 0, "key_acr_hit": 1,
-                "dense_rank": np.nan, "name_tfidf_rank": np.nan, "addr_tfidf_rank": np.nan,
-            })
-
-    out = _union_and_cap(all_records, C.UNION_TOP_N)
+    out = _union_and_cap(big, C.UNION_TOP_N)
+    del big
+    gc.collect()
     write_parquet(out, out_path)
-    print(f"[blocking] wrote {out_path}  {len(out):,} pairs "
-          f"({out['s1_id'].nunique():,} unique S1)")
+    _log(f"[blocking] wrote {out_path}  {len(out):,} pairs "
+         f"({out['s1_id'].nunique():,} unique S1)")
+
+    # Fire-and-forget upload — crash-safe checkpoint before next partition.
+    _upload_partition_async(out_path, "blocking")
     return out
 
 
 def block_all_partitions() -> None:
-    """Iterate over every (split, country) discovered from normalized files."""
     countries = sorted({p.stem.split("__")[-1] for p in
                         C.NORMALIZED_DIR.glob("*__s1__*.parquet")})
+    _log(f"[blocking] countries detected: {countries}")
     for split in ("train", "test"):
         for country in countries:
             if not (C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet").exists():
@@ -433,10 +639,12 @@ def blocking_recall_report() -> None:
     for country_path in C.BLOCKING_DIR.glob("train__*.parquet"):
         country = country_path.stem.split("__")[-1]
         cand = pd.read_parquet(country_path,
-                                columns=["s1_id", "cand_id", "n_arms_hit"])
+                               columns=["s1_id", "cand_id", "n_arms_hit"])
         cand_set = set(zip(cand["s1_id"], cand["cand_id"]))
-        gt_country = gt_gv[gt_gv["source1_entity_id"].isin(cand["s1_id"].unique())]
-        gt_pairs = set(zip(gt_country["source1_entity_id"], gt_country["matched_id"]))
+        gt_country = gt_gv[gt_gv["source1_entity_id"].isin(
+            cand["s1_id"].unique())]
+        gt_pairs = set(
+            zip(gt_country["source1_entity_id"], gt_country["matched_id"]))
         hits = len(gt_pairs & cand_set)
         per_country[country] = {
             "true_pairs": len(gt_pairs),
@@ -447,7 +655,7 @@ def blocking_recall_report() -> None:
         f"{k}: {v['recall']:.4f} (hits {v['hits']:,}/{v['true_pairs']:,})"
         for k, v in per_country.items()
     )
-    print("[blocking] recall on train G∪V:\n" + report)
+    _log("[blocking] recall on train G∪V:\n" + report)
     (C.REPORTS_DIR / "blocking_recall.txt").write_text(report, encoding="utf-8")
 
 

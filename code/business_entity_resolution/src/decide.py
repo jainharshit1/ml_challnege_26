@@ -44,23 +44,14 @@ def decide(
     if df.empty:
         return df
 
-    # 2. One-to-one assignment (per-country if provided, else global)
-    def _one_to_one(sub: pd.DataFrame) -> pd.DataFrame:
-        sub = sub.sort_values("p_match", ascending=False)
-        assigned: set[str] = set()
-        rows = []
-        for row in sub.itertuples(index=False):
-            if row.cand_id in assigned:
-                continue
-            assigned.add(row.cand_id)
-            rows.append(row)
-        return pd.DataFrame(rows)
-
+    # 2. One-to-one assignment — vectorized: sort by p_match desc, then
+    #    drop later occurrences of each cand_id (within country if provided).
     if country_col and country_col in df.columns:
-        df = (df.groupby(country_col, group_keys=False, sort=False)
-                .apply(_one_to_one))
+        df = df.sort_values([country_col, "p_match"], ascending=[True, False])
+        df = df[~df.duplicated(subset=[country_col, "cand_id"], keep="first")]
     else:
-        df = _one_to_one(df)
+        df = df.sort_values("p_match", ascending=False)
+        df = df[~df.duplicated(subset=["cand_id"], keep="first")]
 
     if df.empty:
         return df
