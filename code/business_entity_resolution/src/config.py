@@ -163,9 +163,9 @@ RERANK_GRAD_ACCUM = 1
 
 # ----------------------------- Stage-B GBDT (§7) ----------------------------
 LGB_NUM_LEAVES = 63
-LGB_N_ESTIMATORS = 2000
-LGB_EARLY_STOP = 50
-LGB_LR = 0.05
+LGB_N_ESTIMATORS = 1000
+LGB_EARLY_STOP = 30
+LGB_LR = 0.1                       # 0.05 -> 0.1: ~half the rounds (deadline)
 LGB_FEATURE_FRACTION = 0.8
 LGB_BAGGING_FRACTION = 0.8
 

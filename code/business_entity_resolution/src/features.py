@@ -90,7 +90,10 @@ def build(split: str, country: str, include_labels: bool = True
         r = pd.read_parquet(rerank)
         cand = cand.merge(r, on=["s1_id", "cand_id"], how="left")
     else:
-        cand["rerank_score"] = np.nan
+        # No reranker run (skipped on CPU): use the Stage-A score as the
+        # rerank signal, as the cascade does, so the competition features
+        # below stay informative instead of a constant -1.
+        cand["rerank_score"] = cand["stage_a_score"]
 
     s1_lookup = _prep_lookup(pd.read_parquet(
         C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet"
@@ -116,128 +119,194 @@ def build(split: str, country: str, include_labels: bool = True
     idf = norm_mod.load_idf(split, country)
     name_freq = _name_freq_map(split, country)
 
-    rows: list[dict] = []
-    for row in cand.itertuples(index=False):
-        s = s1_lookup.loc[row.s1_id] if row.s1_id in s1_lookup.index else None
-        p_src = pool_lookups.get(row.cand_source)
-        if s is None or p_src is None or row.cand_id not in p_src.index:
-            continue
-        c = p_src.loc[row.cand_id]
-
-        # Names
-        s_core = s["core_name"] if isinstance(s["core_name"], str) else ""
-        c_core = c["core_name"] if isinstance(c["core_name"], str) else ""
-        s_exp = s["name_expanded"] if isinstance(s["name_expanded"], str) else ""
-        c_exp = c["name_expanded"] if isinstance(c["name_expanded"], str) else ""
-        s_roman = (s["name_roman"] if isinstance(s["name_roman"], str) else "") or s_core
-        c_roman = (c["name_roman"] if isinstance(c["name_roman"], str) else "") or c_core
-        s_toks = s_core.split()
-        c_toks = c_core.split()
-
-        # Addresses
-        s_addr = s["address_expanded"] if isinstance(s["address_expanded"], str) else ""
-        c_addr = c["address_expanded"] if isinstance(c["address_expanded"], str) else ""
-
-        # Legal suffix agreement
-        s_leg = s["legal_suffix"] if isinstance(s["legal_suffix"], str) else ""
-        c_leg = c["legal_suffix"] if isinstance(c["legal_suffix"], str) else ""
-        if not s_leg and not c_leg:
-            leg = 0        # both missing
-        elif s_leg == c_leg:
-            leg = 1        # same
-        elif not s_leg or not c_leg:
-            leg = 2        # one missing
-        else:
-            leg = 3        # different
-
-        rows.append({
-            "s1_id": row.s1_id,
-            "cand_id": row.cand_id,
-            "cand_source": row.cand_source,
-
-            # ---- Name features ----
-            "f_name_jw_core": JaroWinkler.normalized_similarity(s_core, c_core),
-            "f_name_jw_exp": JaroWinkler.normalized_similarity(s_exp, c_exp),
-            "f_name_lev": 1.0 - Levenshtein.normalized_distance(s_core, c_core),
-            "f_name_sort": rf_fuzz.token_sort_ratio(s_core, c_core) / 100.0,
-            "f_name_set": rf_fuzz.token_set_ratio(s_core, c_core) / 100.0,
-            "f_name_partial": rf_fuzz.partial_ratio(s_core, c_core) / 100.0,
-            "f_name_char3": _char3_jaccard(s_core, c_core),
-            "f_name_word_jac": len(set(s_toks) & set(c_toks)) /
-                              max(len(set(s_toks) | set(c_toks)), 1),
-            "f_name_idf_jac": _idf_jaccard(s_core, c_core, idf),
-            "f_name_core_eq": int(s_core == c_core and s_core != ""),
-            "f_name_sorted_eq": int(s["name_sorted"] == c["name_sorted"]
-                                    and s["name_sorted"] != ""),
-            "f_acronym_match": int(bool(
-                (s["acronym"] and s["acronym"] == c["acronym"])
-                or (s["acronym"] and s["acronym"] == "".join(t[0] for t in c_toks))
-                or (c["acronym"] and c["acronym"] == "".join(t[0] for t in s_toks))
-            )),
-            "f_legal_state": leg,
-            "f_domain_match": int(
-                bool(s["name_domain"]) and s["name_domain"] == c["name_domain"]
-            ),
-            "f_expansion_changed_s": int(bool(s["expansion_changed_name"])),
-            "f_expansion_changed_c": int(bool(c["expansion_changed_name"])),
-            "f_romanized_used": int(bool(
-                not (s["romanization_ok"] and c["romanization_ok"])
-                or s["name_script"] != "latin"
-                or c["name_script"] != "latin")),
-            "f_script_same": int(s["name_script"] == c["name_script"]),
-
-            # ---- Address features ----
-            "f_postal_eq": int(bool(s["postal_code"])
-                                and s["postal_code"] == c["postal_code"]),
-            "f_postal_prefix_eq": int(bool(s["postal_prefix3"])
-                                       and s["postal_prefix3"] == c["postal_prefix3"]),
-            "f_house_eq": int(bool(s["house_number"])
-                               and s["house_number"] == c["house_number"]),
-            "f_nums_jac": len(set((s["all_numbers"] or "").split())
-                               & set((c["all_numbers"] or "").split())) /
-                           max(len(set((s["all_numbers"] or "").split())
-                                    | set((c["all_numbers"] or "").split())), 1),
-            "f_nums_shared": len(set((s["all_numbers"] or "").split())
-                                 & set((c["all_numbers"] or "").split())),
-            "f_street_idf_jac": _idf_jaccard(s["street_tokens"] or "",
-                                              c["street_tokens"] or "", idf),
-            "f_loc_overlap": len(set((s["locality_tokens"] or "").split())
-                                  & set((c["locality_tokens"] or "").split())) /
-                              max(len(set((s["locality_tokens"] or "").split())
-                                       | set((c["locality_tokens"] or "").split())), 1),
-            "f_addr_jw": JaroWinkler.normalized_similarity(s_addr, c_addr),
-            "f_addr_set": rf_fuzz.token_set_ratio(s_addr, c_addr) / 100.0,
-            "f_landmark_overlap": len(set((s["landmark_text"] or "").split())
-                                       & set((c["landmark_text"] or "").split())),
-            "f_addr_missing_s": int(s["address_missing"]),
-            "f_addr_missing_c": int(c["address_missing"]),
-            "f_postal_missing_s": int(s["postal_missing"]),
-            "f_postal_missing_c": int(c["postal_missing"]),
-            "f_house_missing_s": int(s["house_number_missing"]),
-            "f_house_missing_c": int(c["house_number_missing"]),
-
-            # ---- Model scores ----
-            "f_dense_score": row.dense_score if not pd.isna(row.dense_score) else -1.0,
-            "f_stage_a": float(row.stage_a_score),
-            "f_rerank": row.rerank_score if not pd.isna(row.rerank_score) else -1.0,
-
-            # ---- Blocking provenance ----
-            "f_dense_rank": row.dense_rank if not pd.isna(row.dense_rank) else 99.0,
-            "f_name_tfidf_rank": row.name_tfidf_rank if not pd.isna(row.name_tfidf_rank) else 99.0,
-            "f_addr_tfidf_rank": row.addr_tfidf_rank if not pd.isna(row.addr_tfidf_rank) else 99.0,
-            "f_n_arms_hit": int(row.n_arms_hit),
-            "f_cand_source_s2": int(row.cand_source == "S2"),
-
-            # ---- Chain / frequency ----
-            "f_name_freq": name_freq.get(c_core, 0),
-            "f_name_freq_log": float(np.log1p(name_freq.get(c_core, 0))),
-            "f_s1_idf_sum": _idf_sum(s_toks, idf),
-        })
-
-    if not rows:
+    # ---- Bulk column lookup (C-level indexer) instead of per-row .loc ----
+    s1_lookup = s1_lookup[~s1_lookup.index.duplicated()]
+    pool_lookups = {k: v[~v.index.duplicated()] for k, v in pool_lookups.items()}
+    s_pos = s1_lookup.index.get_indexer(cand["s1_id"].to_numpy())
+    src_arr = cand["cand_source"].to_numpy()
+    cid_arr = cand["cand_id"].to_numpy()
+    c_pos = np.full(len(cand), -1, dtype=np.int64)
+    for k, v in pool_lookups.items():
+        m = src_arr == k
+        if m.any():
+            c_pos[m] = v.index.get_indexer(cid_arr[m])
+    keep = (s_pos >= 0) & (c_pos >= 0)
+    cand = cand[keep].reset_index(drop=True)
+    s_pos, c_pos, src_arr = s_pos[keep], c_pos[keep], src_arr[keep]
+    n = len(cand)
+    if n == 0:
         return pd.DataFrame(), pd.DataFrame(), None
 
-    df = pd.DataFrame(rows)
+    def _s(col):
+        return s1_lookup[col].to_numpy()[s_pos]
+
+    def _c(col):
+        out = np.empty(n, dtype=object)
+        for k, v in pool_lookups.items():
+            m = src_arr == k
+            if m.any():
+                out[m] = v[col].to_numpy()[c_pos[m]]
+        return out
+
+    def _str(a):
+        return [x if isinstance(x, str) else "" for x in a]
+
+    def _num(a):
+        return pd.to_numeric(pd.Series(a), errors="coerce").fillna(0).to_numpy()
+
+    s_core, c_core = _str(_s("core_name")), _str(_c("core_name"))
+    s_exp, c_exp = _str(_s("name_expanded")), _str(_c("name_expanded"))
+    s_addr, c_addr = _str(_s("address_expanded")), _str(_c("address_expanded"))
+    s_leg, c_leg = _str(_s("legal_suffix")), _str(_c("legal_suffix"))
+    s_acr, c_acr = _str(_s("acronym")), _str(_c("acronym"))
+    s_dom, c_dom = _str(_s("name_domain")), _str(_c("name_domain"))
+    s_nums, c_nums = _str(_s("all_numbers")), _str(_c("all_numbers"))
+    s_street, c_street = _str(_s("street_tokens")), _str(_c("street_tokens"))
+    s_loc, c_loc = _str(_s("locality_tokens")), _str(_c("locality_tokens"))
+    s_lm, c_lm = _str(_s("landmark_text")), _str(_c("landmark_text"))
+
+    # ---- rapidfuzz scores, element-wise and multi-threaded in C++ ----
+    import os as _os
+    from rapidfuzz import process as rf_process  # type: ignore
+    workers = max(1, C.N_JOBS // max(1, int(_os.environ.get("FEATURES_JOBS", "1"))))
+
+    def _pd(a, b, scorer, scale=1.0):
+        return rf_process.cpdist(a, b, scorer=scorer, workers=workers,
+                                 dtype=np.float64) / scale
+
+    f_name_jw_core = _pd(s_core, c_core, JaroWinkler.normalized_similarity)
+    f_name_jw_exp = _pd(s_exp, c_exp, JaroWinkler.normalized_similarity)
+    f_name_lev = _pd(s_core, c_core, Levenshtein.normalized_similarity)
+    f_name_sort = _pd(s_core, c_core, rf_fuzz.token_sort_ratio, 100.0)
+    f_name_set = _pd(s_core, c_core, rf_fuzz.token_set_ratio, 100.0)
+    f_name_partial = _pd(s_core, c_core, rf_fuzz.partial_ratio, 100.0)
+    f_addr_jw = _pd(s_addr, c_addr, JaroWinkler.normalized_similarity)
+    f_addr_set = _pd(s_addr, c_addr, rf_fuzz.token_set_ratio, 100.0)
+
+    # ---- Set-based features: tight loop with memoised tokenisation ----
+    _c3: dict = {}
+    _tk: dict = {}
+
+    def c3(x):
+        r = _c3.get(x)
+        if r is None:
+            r = _c3[x] = _char3(x)
+        return r
+
+    def tk(x):
+        r = _tk.get(x)
+        if r is None:
+            r = _tk[x] = set(x.split())
+        return r
+
+    def ini(x):
+        return "".join(t[0] for t in x.split())
+
+    f_name_char3 = np.empty(n); f_name_word_jac = np.empty(n)
+    f_name_idf_jac = np.empty(n); f_acronym_match = np.empty(n, dtype=np.int8)
+    f_legal_state = np.empty(n, dtype=np.int8); f_nums_jac = np.empty(n)
+    f_nums_shared = np.empty(n); f_street_idf_jac = np.empty(n)
+    f_loc_overlap = np.empty(n); f_landmark_overlap = np.empty(n)
+    f_s1_idf_sum = np.empty(n); f_name_freq = np.empty(n)
+    for i in range(n):
+        sc, cc = s_core[i], c_core[i]
+        A3, B3 = c3(sc), c3(cc)
+        f_name_char3[i] = (1.0 if not A3 and not B3 else
+                           len(A3 & B3) / len(A3 | B3))
+        st, ct = tk(sc), tk(cc)
+        f_name_word_jac[i] = len(st & ct) / max(len(st | ct), 1)
+        f_name_idf_jac[i] = _idf_jaccard(sc, cc, idf)
+        sa, ca = s_acr[i], c_acr[i]
+        f_acronym_match[i] = bool((sa and sa == ca) or (sa and sa == ini(cc))
+                                  or (ca and ca == ini(sc)))
+        sl, cl = s_leg[i], c_leg[i]
+        f_legal_state[i] = (0 if not sl and not cl else 1 if sl == cl
+                            else 2 if not sl or not cl else 3)
+        sn, cn = tk(s_nums[i]), tk(c_nums[i])
+        inter = len(sn & cn)
+        f_nums_jac[i] = inter / max(len(sn | cn), 1)
+        f_nums_shared[i] = inter
+        f_street_idf_jac[i] = _idf_jaccard(s_street[i], c_street[i], idf)
+        sL, cL = tk(s_loc[i]), tk(c_loc[i])
+        f_loc_overlap[i] = len(sL & cL) / max(len(sL | cL), 1)
+        f_landmark_overlap[i] = len(tk(s_lm[i]) & tk(c_lm[i]))
+        f_s1_idf_sum[i] = _idf_sum(sc.split(), idf)
+        f_name_freq[i] = name_freq.get(cc, 0)
+    del _c3, _tk
+
+    def _eq_nonempty(a, b):
+        a = np.asarray(a, dtype=object); b = np.asarray(b, dtype=object)
+        return ((a == b) & (a != "")).astype(np.int8)
+
+    def _raw_eq_nonempty(col):
+        # original: bool(s[col]) and s[col] == c[col]   (NaN is never equal)
+        a = pd.Series(_s(col)); b = pd.Series(_c(col))
+        return (a.notna() & (a != "") & (a == b)).to_numpy().astype(np.int8)
+
+    s_rom, c_rom = _num(_s("romanization_ok")), _num(_c("romanization_ok"))
+    s_scr, c_scr = pd.Series(_s("name_script")), pd.Series(_c("name_script"))
+    df = pd.DataFrame({
+        "s1_id": cand["s1_id"].to_numpy(),
+        "cand_id": cand["cand_id"].to_numpy(),
+        "cand_source": cand["cand_source"].to_numpy(),
+
+        # ---- Name features ----
+        "f_name_jw_core": f_name_jw_core,
+        "f_name_jw_exp": f_name_jw_exp,
+        "f_name_lev": f_name_lev,
+        "f_name_sort": f_name_sort,
+        "f_name_set": f_name_set,
+        "f_name_partial": f_name_partial,
+        "f_name_char3": f_name_char3,
+        "f_name_word_jac": f_name_word_jac,
+        "f_name_idf_jac": f_name_idf_jac,
+        "f_name_core_eq": _eq_nonempty(s_core, c_core),
+        "f_name_sorted_eq": _raw_eq_nonempty("name_sorted"),
+        "f_acronym_match": f_acronym_match,
+        "f_legal_state": f_legal_state,
+        "f_domain_match": _eq_nonempty(s_dom, c_dom),
+        "f_expansion_changed_s": (_num(_s("expansion_changed_name")) != 0).astype(np.int8),
+        "f_expansion_changed_c": (_num(_c("expansion_changed_name")) != 0).astype(np.int8),
+        "f_romanized_used": (~((s_rom != 0) & (c_rom != 0))
+                             | (s_scr != "latin").to_numpy()
+                             | (c_scr != "latin").to_numpy()).astype(np.int8),
+        "f_script_same": (s_scr.notna() & (s_scr == c_scr)).to_numpy().astype(np.int8),
+
+        # ---- Address features ----
+        "f_postal_eq": _raw_eq_nonempty("postal_code"),
+        "f_postal_prefix_eq": _raw_eq_nonempty("postal_prefix3"),
+        "f_house_eq": _raw_eq_nonempty("house_number"),
+        "f_nums_jac": f_nums_jac,
+        "f_nums_shared": f_nums_shared,
+        "f_street_idf_jac": f_street_idf_jac,
+        "f_loc_overlap": f_loc_overlap,
+        "f_addr_jw": f_addr_jw,
+        "f_addr_set": f_addr_set,
+        "f_landmark_overlap": f_landmark_overlap,
+        "f_addr_missing_s": _num(_s("address_missing")),
+        "f_addr_missing_c": _num(_c("address_missing")),
+        "f_postal_missing_s": _num(_s("postal_missing")),
+        "f_postal_missing_c": _num(_c("postal_missing")),
+        "f_house_missing_s": _num(_s("house_number_missing")),
+        "f_house_missing_c": _num(_c("house_number_missing")),
+
+        # ---- Model scores ----
+        "f_dense_score": cand["dense_score"].fillna(-1.0).to_numpy(),
+        "f_stage_a": cand["stage_a_score"].astype(float).to_numpy(),
+        "f_rerank": cand["rerank_score"].fillna(-1.0).to_numpy(),
+
+        # ---- Blocking provenance ----
+        "f_dense_rank": cand["dense_rank"].fillna(99.0).to_numpy(),
+        "f_name_tfidf_rank": cand["name_tfidf_rank"].fillna(99.0).to_numpy(),
+        "f_addr_tfidf_rank": cand["addr_tfidf_rank"].fillna(99.0).to_numpy(),
+        "f_n_arms_hit": cand["n_arms_hit"].astype(int).to_numpy(),
+        "f_cand_source_s2": (src_arr == "S2").astype(np.int8),
+
+        # ---- Chain / frequency ----
+        "f_name_freq": f_name_freq,
+        "f_name_freq_log": np.log1p(f_name_freq),
+        "f_s1_idf_sum": f_s1_idf_sum,
+    })
 
     # ---- Competition features (S1-side + candidate-side; §7.1) ----
     df = df.sort_values(["s1_id", "f_rerank"], ascending=[True, False])

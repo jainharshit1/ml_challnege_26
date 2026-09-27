@@ -54,33 +54,48 @@ def _v_ground_truth() -> dict[str, list[str]]:
     return truth
 
 
+def _eval_combos(scores_v: pd.DataFrame, truths: dict[str, list[str]],
+                 combos: list[tuple]) -> list[dict]:
+    rows = []
+    for idx, (pt, st, mg) in combos:
+        kept = decide_mod.decide(
+            scores_v, pair_thresh=pt, singleton_thresh=st,
+            margin_thresh=mg, country_col="_country",
+        )
+        preds: dict[str, list[str]] = {sid: [] for sid in truths}
+        for row in kept.itertuples(index=False):
+            preds[row.s1_id].append(row.cand_id)
+        m = macro_f_beta(preds, truths)
+        rows.append({
+            "_i": idx, "pair": pt, "singleton": st,
+            "margin": mg if mg is not None else -1.0,
+            "macro_f05": m["macro_f_0_5"],
+            "singleton_f05": m["singleton_f_0_5"],
+            "nonsingleton_f05": m["nonsingleton_f_0_5"],
+            "pred_singleton_rate": m["predicted_singleton_rate"],
+            "mean_matches": m["mean_predicted_matches"],
+        })
+    return rows
+
+
 def _grid_eval(scores_v: pd.DataFrame, truths: dict[str, list[str]],
                grid_pair: list[float], grid_singleton: list[float],
                grid_margin: list[float | None]) -> pd.DataFrame:
-    rows = []
-    for pt in grid_pair:
-        for st in grid_singleton:
-            if st < pt:
-                continue
-            for mg in grid_margin:
-                kept = decide_mod.decide(
-                    scores_v, pair_thresh=pt, singleton_thresh=st,
-                    margin_thresh=mg, country_col="_country",
-                )
-                preds: dict[str, list[str]] = {sid: [] for sid in truths}
-                for row in kept.itertuples(index=False):
-                    preds[row.s1_id].append(row.cand_id)
-                m = macro_f_beta(preds, truths)
-                rows.append({
-                    "pair": pt, "singleton": st,
-                    "margin": mg if mg is not None else -1.0,
-                    "macro_f05": m["macro_f_0_5"],
-                    "singleton_f05": m["singleton_f_0_5"],
-                    "nonsingleton_f05": m["nonsingleton_f_0_5"],
-                    "pred_singleton_rate": m["predicted_singleton_rate"],
-                    "mean_matches": m["mean_predicted_matches"],
-                })
-    return pd.DataFrame(rows)
+    combos = list(enumerate((pt, st, mg) for pt in grid_pair for st in grid_singleton
+                            if st >= pt for mg in grid_margin))
+    # decide() drops p < pair_thresh first, so rows below the lowest grid
+    # threshold never matter; drop them once instead of in every combo.
+    scores_v = scores_v[scores_v["p_match"] >= min(grid_pair)]
+    n_jobs = max(1, min(C.N_JOBS, len(combos)))
+    if n_jobs == 1:
+        return pd.DataFrame(_eval_combos(scores_v, truths, combos)).drop(columns="_i")
+    from joblib import Parallel, delayed
+    chunks = [combos[i::n_jobs] for i in range(n_jobs)]
+    out = Parallel(n_jobs=n_jobs, backend="loky")(
+        delayed(_eval_combos)(scores_v, truths, ch) for ch in chunks if ch)
+    # restore sequential grid order so tie-breaking matches the serial loop
+    return (pd.DataFrame([r for part in out for r in part])
+            .sort_values("_i").drop(columns="_i").reset_index(drop=True))
 
 
 def tune(loco_tag: str = "") -> dict:

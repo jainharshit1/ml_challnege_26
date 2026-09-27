@@ -111,8 +111,9 @@ def _pairwise_feats(cands: pd.DataFrame,
     if n == 0:
         return pd.DataFrame()
 
-    s1_lookup = s1_map.set_index("entity_id")
-    pool_lookup = {k: v.set_index("entity_id") for k, v in pool_maps.items()}
+    s1_lookup = s1_map.drop_duplicates("entity_id").set_index("entity_id")
+    pool_lookup = {k: v.drop_duplicates("entity_id").set_index("entity_id")
+                   for k, v in pool_maps.items()}
 
     s1_ids_arr = cands["s1_id"].to_numpy()
     cand_ids_arr = cands["cand_id"].to_numpy()
@@ -156,26 +157,56 @@ def _pairwise_feats(cands: pd.DataFrame,
     del s_name_core, c_name_core, s_name_roman, c_name_roman
 
     print(f"[prefilter]   computing name sims…", flush=True)
-    f_name_jw = np.empty(n, dtype=np.float32)
-    f_name_sort = np.empty(n, dtype=np.float32)
-    f_name_set = np.empty(n, dtype=np.float32)
+    # rapidfuzz scores element-wise in multi-threaded C++ (cpdist).
+    from rapidfuzz import process as rf_process  # type: ignore
+    workers = max(1, C.N_JOBS // max(1, int(os.environ.get("PREFILTER_JOBS", "1"))))
+    s_name_l, c_name_l = s_name.tolist(), c_name.tolist()
+
+    def _pd(a, b, scorer, scale=1.0):
+        return (rf_process.cpdist(a, b, scorer=scorer, workers=workers,
+                                  dtype=np.float64) / scale).astype(np.float32)
+
+    f_name_jw = _pd(s_name_l, c_name_l, JaroWinkler.normalized_similarity)
+    f_name_sort = _pd(s_name_l, c_name_l, rf_fuzz.token_sort_ratio, 100.0)
+    f_name_set = _pd(s_name_l, c_name_l, rf_fuzz.token_set_ratio, 100.0)
+    f_addr_set = _pd(s_addr.tolist(), c_addr.tolist(), rf_fuzz.token_set_ratio, 100.0)
+
+    # Set-based sims: tight loop, tokenisation memoised (S1 repeats ~40x).
     f_name_char3 = np.empty(n, dtype=np.float32)
-    f_addr_set = np.empty(n, dtype=np.float32)
     f_nums_jac = np.empty(n, dtype=np.float32)
     f_loc_overlap = np.empty(n, dtype=np.float32)
+    _c3: dict = {}
+    _tk: dict = {}
+
+    def c3(x):
+        r = _c3.get(x)
+        if r is None:
+            r = _c3[x] = _char3(x)
+        return r
+
+    def jac(a, b):
+        if not a and not b:
+            return 1.0
+        A = _tk.get(a)
+        if A is None:
+            A = _tk[a] = set(a.split())
+        B = _tk.get(b)
+        if B is None:
+            B = _tk[b] = set(b.split())
+        if not A and not B:
+            return 1.0
+        union = len(A | B)
+        return len(A & B) / union if union else 0.0
 
     for i in range(n):
-        sn = s_name[i]
-        cn = c_name[i]
-        f_name_jw[i] = JaroWinkler.normalized_similarity(sn, cn)
-        f_name_sort[i] = rf_fuzz.token_sort_ratio(sn, cn) / 100.0
-        f_name_set[i] = rf_fuzz.token_set_ratio(sn, cn) / 100.0
-        f_name_char3[i] = _char3_jaccard(sn, cn)
-        f_addr_set[i] = rf_fuzz.token_set_ratio(s_addr[i], c_addr[i]) / 100.0
-        f_nums_jac[i] = _jaccard(s_nums[i], c_nums[i])
-        f_loc_overlap[i] = _jaccard(s_loc[i], c_loc[i])
-        if i and i % 500_000 == 0:
+        A3, B3 = c3(s_name_l[i]), c3(c_name_l[i])
+        f_name_char3[i] = (1.0 if not A3 and not B3 else
+                           len(A3 & B3) / len(A3 | B3))
+        f_nums_jac[i] = jac(s_nums[i], c_nums[i])
+        f_loc_overlap[i] = jac(s_loc[i], c_loc[i])
+        if i and i % 2_000_000 == 0:
             print(f"[prefilter]     {i:,}/{n:,}", flush=True)
+    del _c3, _tk
 
     # Vectorized equality features
     f_house_eq = ((s_house == c_house) & (s_house != "")).astype(np.int8)
