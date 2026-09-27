@@ -1,8 +1,83 @@
-# Business Entity Resolution — v3 pipeline
+# Business Entity Resolution — v3 pipeline (Team Titans)
 
-Implements the plan in `../../entity_resolution_strategy.md`. Every stage is
-idempotent (skips completed files) so you can crash and resume. Fine-tuning
-uses **only** data provided under `dataset/`; no external labels.
+End-to-end pipeline: raw TSVs → normalisation → six-arm blocking → Stage-A
+LightGBM prefilter (→ `output/candidate_pairs.tsv`) → Stage-B LightGBM →
+decision layer (→ `output/matching_results.tsv`). The methodology write-up is
+`Documentation_template.md` at the root of the submission zip. Section
+references like "plan §4.2" in code comments point to our internal design
+plan; the write-up covers the same material.
+
+Every stage is idempotent (skips completed files) so you can crash and resume.
+All models, maps and statistics are learned **only** from the files provided
+under `dataset/`; no external labels or lookups.
+
+## Reproduce from the submission zip (step by step)
+
+These steps regenerate both files in `output/` from the raw challenge data,
+using only this folder. All paths are relative to the **zip root** (the folder
+that contains `code/`, `output/` and `Documentation_template.md`).
+
+1. **Place the challenge data** where `src/config.py` expects it:
+
+   ```
+   <zip root>/6ab10eb3b23ba_student_resource/student_resource/dataset/train/*.tsv
+   <zip root>/6ab10eb3b23ba_student_resource/student_resource/dataset/test/*.tsv
+   ```
+
+   A symlink works too:
+   `mkdir -p 6ab10eb3b23ba_student_resource && ln -s /path/to/student_resource 6ab10eb3b23ba_student_resource/student_resource`
+
+2. **Create the environment** (Python 3.14.4 on Ubuntu, as in the submitted run):
+
+   ```bash
+   cd code/business_entity_resolution
+   python -m venv .venv && source .venv/bin/activate
+   pip install -U pip && pip install -r requirements.txt
+   sudo apt-get install -y libgomp1        # OpenMP runtime for LightGBM
+   ```
+
+3. **Get the dense encoder weights.** `src/config.py` sets `DENSE_MODEL_LOCAL`
+   to the local folder the submitted run used. On a new machine either set it
+   to `None` (the public `BAAI/bge-m3` weights are then downloaded from the
+   Hugging Face hub on first use), or download them once and point
+   `DENSE_MODEL_LOCAL` at the folder:
+
+   ```bash
+   python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-m3', local_dir='models/bge-m3')"
+   ```
+
+   This is the only network access the pipeline needs. The weights are used
+   unmodified (no fine-tuning).
+
+4. **Start from a clean state.** Stages skip work whose output already exists,
+   so remove any old `artifacts/` intermediates and `output/` files at the zip
+   root before a from-scratch run. Keep `SUBSAMPLE_FRACTION = 1.0` and
+   `NORMALIZE_ROW_CAP = None` in `src/config.py` (both are the defaults). Leave
+   `HF_TOKEN` unset (see *Network access* below).
+
+5. **Run the pipeline** with the exact settings of the submitted run:
+
+   ```bash
+   cd code/business_entity_resolution
+   export N_JOBS=32 BLOCK_JOBS=3 PREFILTER_JOBS=5 FEATURES_JOBS=5
+   python -m src.run_pipeline --skip reranker_train reranker_score loco
+   ```
+
+6. **Validate** (from the zip root):
+
+   ```bash
+   python3 6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py \
+       --matching output/matching_results.tsv \
+       --candidate output/candidate_pairs.tsv \
+       --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test \
+       --check-ids
+   ```
+
+Outputs: `output/candidate_pairs.tsv` (written by stage `prefilter_score`) and
+`output/matching_results.tsv` (written by stage `decide`). Validation scores,
+tuned thresholds and blocking/prefilter recall are written to
+`artifacts/reports/`. See *Reproducibility* at the end for what is and is not
+bit-for-bit deterministic.
 
 ## Layout
 
@@ -28,8 +103,13 @@ code/business_entity_resolution/
     ├── decide.py           # §8.1 threshold → 1-to-1 → cap → singleton gate
     ├── tune_thresholds.py  # §8.3–8.4 coarse+fine grid, France procedure
     ├── metrics.py          # per-entity F0.5 + macro
-    └── run_pipeline.py     # end-to-end orchestration
+    └── run_pipeline.py     # end-to-end orchestration (entry point)
 ```
+
+`scripts/` and `RESUME_INSTRUCTIONS.md`, if present, are infrastructure
+helpers we used to checkpoint our own intermediate files between cloud
+machines. They are not part of the modelling pipeline and are not needed to
+reproduce the outputs.
 
 Artifacts and outputs land in siblings of this folder (defined in `config.py`):
 
@@ -38,68 +118,34 @@ Artifacts and outputs land in siblings of this folder (defined in `config.py`):
 ../../output/            # matching_results.tsv, candidate_pairs.tsv
 ```
 
-## Setup
+## Notes on the submitted run
 
-```bash
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -r requirements.txt
-```
-
-`requirements.txt` pins the exact environment of the submitted run (Python
-3.14.4, Ubuntu). LightGBM additionally needs the system OpenMP runtime:
-`sudo apt-get install -y libgomp1`. The pinned `faiss-gpu` wheel runs on CPU
-when no GPU is present.
-
-The dense encoder `BAAI/bge-m3` is loaded from `DENSE_MODEL_LOCAL` in
-`src/config.py`; set it to `None` to fetch it from the Hugging Face hub once,
-or point it to a local copy for fully offline runs.
-
-## Reproduce the submitted run (Team Titans)
-
-Data layout expected by `src/config.py` (paths are relative to the repository root):
-
-```
-6ab10eb3b23ba_student_resource/student_resource/dataset/{train,test}/*.tsv
-```
-
-Exact command and settings that produced `output/matching_results.tsv` and
-`output/candidate_pairs.tsv` (AWS m6i.8xlarge, 32 vCPU, 128 GB RAM, no GPU):
-
-```bash
-cd code/business_entity_resolution
-export N_JOBS=32 BLOCK_JOBS=3 PREFILTER_JOBS=5 FEATURES_JOBS=5
-python -m src.run_pipeline --skip reranker_train reranker_score loco
-```
-
-- The cross-encoder stages are skipped (CPU-only budget); Stage-B then uses the
-  Stage-A score as its rerank signal.
+- Hardware: AWS m6i.8xlarge (32 vCPU, 128 GB RAM, **no GPU**). The pinned
+  `faiss-gpu` wheel runs on CPU when no GPU is present.
+- The cross-encoder stages (`reranker_train`, `reranker_score`) are skipped
+  (CPU-only budget); Stage-B then uses the Stage-A score as its rerank signal.
+  Running `python -m src.run_pipeline` with no `--skip` would try to fine-tune
+  the reranker, which needs a GPU and is **not** what produced the outputs.
 - `loco` is skipped; France uses the in-country thresholds.
 - Wall-clock on that machine: embeddings ~3 h (computed once), blocking ~92 min,
-  everything after blocking ~45 min.
-- Validate before submitting (from `student_resource/`):
-  `python3 utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test --check-ids`
+  everything after blocking ~45 min. Per-stage times are in
+  `artifacts/reports/stage_timings.json`.
 
 Useful knobs (environment variables): `N_JOBS` (threads), `BLOCK_JOBS`
 (partitions blocked in parallel), `PREFILTER_JOBS` / `FEATURES_JOBS`
 (partition-level parallelism), `TFIDF_MAX_DF` / `TFIDF_MAX_DF_NAME` (TF-IDF
 pruning), `UNION_TOP_N` (per-S1 candidate cap after blocking, default 40),
-`BLOCK_TRAIN_GROUPS` (train S1 groups to block, default `G,V`).
+`BLOCK_TRAIN_GROUPS` (train S1 groups to block, default `G,V`). The submitted
+run used the defaults for all of these except the four exported above.
 
-## The one knob you'll touch
+## Development knob
 
-`src/config.py` line 1: `SUBSAMPLE_FRACTION: float = 1.0`
-Lower it (e.g., `0.1`) to iterate locally on 10% of G entities without
-disturbing V (kept intact so evaluation numbers stay meaningful).
+`src/config.py`: `SUBSAMPLE_FRACTION: float = 1.0`. Lower it (e.g., `0.1`) to
+iterate locally on 10% of G entities without disturbing V (kept intact so
+evaluation numbers stay meaningful). **Must be 1.0 to reproduce the
+submission.**
 
-## How to run
-
-Full pipeline:
-
-```bash
-cd code/business_entity_resolution
-python -m src.run_pipeline
-```
+## Running individual stages
 
 Resume from a stage:
 
@@ -113,10 +159,10 @@ Run one stage in isolation (also useful when debugging):
 python -m src.run_pipeline --only normalize_first idf
 ```
 
-Skip a stage entirely (e.g., skip reranker fine-tuning and go zero-shot):
+Skip stages (the submitted run skips the reranker and LOCO stages):
 
 ```bash
-python -m src.run_pipeline --skip reranker_train
+python -m src.run_pipeline --skip reranker_train reranker_score loco
 ```
 
 ## Execution order — what depends on what
@@ -171,50 +217,60 @@ Stages MUST run in this order (later stages read earlier stages' parquets):
   set filtered by the Stage-B model — the decision layer only removes pairs,
   never adds them).
 
-## Validate the submission
+## Network access and fair play
 
-```bash
-python 6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py \
-    --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv \
-    --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test
-```
-
-Add `--check-ids` for the memory-heavier ID-existence check.
-
-## Rough runtime on a g5.4xlarge (plan §10)
-
-Numbers are the plan's *estimates*; measure on 100K samples first.
-
-| Stage | Time |
-|-------|------|
-| normalize | < 1 h |
-| embed (bge-m3) | 2–5 h |
-| blocking (all arms) | 2–4 h |
-| prefilter train + score | 1–2 h |
-| reranker fine-tune | 1–2 h |
-| reranker inference | 5–8 h |
-| stage-B features + train + score | 2–3 h |
-| threshold tune + France + decide | < 1 h |
-
-## Baseline shortcut for early submission (plan §11 step 7)
-
-If you're short on GPU time, you can produce a full submission from stages
-1–11 + 17 + 20 by treating the Stage-A score as the final score:
-
-```bash
-python -m src.run_pipeline --only stage0 splits abbrev_seed normalize_first \
-    abbrev_mine normalize_final idf embed block prefilter_train prefilter_score
-```
-
-then hand-write a `matching_results.tsv` by running the decision layer on
-`prefilter/*.parquet` with `stage_a_score` renamed to `p_match`. This gives
-a valid leaderboard row while the reranker fine-tunes.
+- **No external lookups.** Nothing in the pipeline queries an entity-resolution
+  service, business registry, geocoder or any other external data source. All
+  labels, abbreviation maps, IDF statistics and models come from the provided
+  files.
+- **Model download (once).** The public `BAAI/bge-m3` weights (MIT) are
+  fetched from the Hugging Face hub unless `DENSE_MODEL_LOCAL` points to a local
+  copy (step 3 above).
+- **Optional checkpoint upload (outbound only).** `src/blocking.py` and
+  `src/prefilter.py` can upload *our own* intermediate parquet files to a
+  private Hugging Face dataset repo, so a crashed cloud machine could resume.
+  This runs only when the `HF_TOKEN` environment variable is set, is
+  write-only, and nothing uploaded is ever read back into the modelling code.
+  Leave `HF_TOKEN` unset for a reproduction run; the pipeline's results do not
+  depend on it.
 
 ## Reproducibility
 
-- All seeds via `config.SEED` (splits, FAISS training sample, LightGBM,
-  reranker training).
-- Every intermediate is a parquet — any single stage can be re-run alone.
-- Model versions pinned in `requirements.txt`.
-- No external data; academic-integrity rule is respected.
+**Seeds.** One seed, `config.SEED = 42`, drives every random choice:
+
+| Where | What is seeded |
+|---|---|
+| `src/splits.py` | entity-level R / G / V split (stratified by country × match-count bucket) |
+| `src/stage0_checks.py` | profiling sample |
+| `src/blocking.py` | FAISS IVF training sample |
+| `src/prefilter.py` | Stage-A LightGBM (`random_state`) |
+| `src/train_gbdt.py` | entity-level early-stopping hold-out and Stage-B LightGBM (`seed`, incl. bagging and feature sub-sampling) |
+| `src/reranker_train.py` | hard-negative sampling and trainer seed (stage skipped in the submitted run) |
+
+The split file used for the submission is kept in the project repository as
+`artifacts/splits/split.parquet` (next to the threshold, recall and timing
+reports in `artifacts/reports/`), so the exact G / V entities can be checked
+against a re-run of `splits`.
+
+**Deterministic by construction:** normalisation, abbreviation mining, IDF,
+TF-IDF blocking, key arms, feature computation (the vectorised features were
+checked to be identical to a per-row reference implementation), threshold grid
+(order-preserving parallel map, fixed tie-break) and the decision layer.
+
+**Sources of small numerical variance.** LightGBM and FAISS use multithreaded
+floating-point reductions, and the bge-m3 embeddings depend on the torch build
+and CPU instruction set. To get the closest match to the submitted outputs, use
+the pinned `requirements.txt`, the same thread settings
+(`N_JOBS=32 BLOCK_JOBS=3 PREFILTER_JOBS=5 FEATURES_JOBS=5`) and a 32-vCPU
+machine. On different hardware, expect at most tiny differences on pairs whose
+score sits right at a threshold; the validation metrics in
+`artifacts/reports/` should agree to within rounding.
+
+**Other guarantees.**
+- Every intermediate is a parquet, so any single stage can be re-run alone and
+  inspected.
+- Library versions are pinned in `requirements.txt`.
+- The candidate file is the exact input of the final model: `prefilter_score`
+  writes `output/candidate_pairs.tsv` from the same top-12 set that Stage-B
+  scores, and the decision layer only removes pairs. Every ID in
+  `matching_results.tsv` is therefore in `candidate_pairs.tsv`.

@@ -210,7 +210,18 @@ Our pipeline reaches **0.929 macro F<sub>0.5</sub> on a held-out validation spli
 ## 7. Rule Compliance
 
 - **Model licences and size:** the final classifier is **LightGBM (MIT)**, a gradient-boosted tree ensemble with far fewer than 8 billion parameters. The only neural model in the submitted pipeline is **`BAAI/bge-m3` (MIT, ~568M parameters)**, used to produce the embeddings for dense blocking. The optional reranker `BAAI/bge-reranker-v2-m3` is Apache-2.0 (~568M parameters) and was not used in the final run. Supporting libraries: FAISS (MIT), scikit-learn (BSD-3), sparse_dot_topn (Apache-2.0), RapidFuzz (MIT), indic-transliteration (MIT), anyascii (ISC).
-- **Fair play:** no external entity-resolution APIs, business registries, government databases, geocoding services, or internet data were used. All labels, abbreviation maps, IDF statistics and models are derived solely from the provided training and test files; the pre-trained embedding model is used as-is and not fine-tuned on external data. The pipeline runs fully offline (`HF_HUB_OFFLINE=1`).
+- **Fair play:** no external entity-resolution APIs, business registries, government databases, geocoding services, or internet data were used. All labels, abbreviation maps, IDF statistics and models are derived solely from the provided training and test files; the test files are used only unsupervised (normalisation, per-country IDF, blocking), since they carry no labels. The pre-trained embedding model is used as-is, with no fine-tuning.
+- **Network access:** the pipeline's only inbound network use is a one-time download of the public `BAAI/bge-m3` weights (skipped when `DENSE_MODEL_LOCAL` points to a local copy). During our cloud runs, `src/blocking.py` and `src/prefilter.py` could also upload our **own** intermediate parquet files to a private Hugging Face dataset repo as crash-recovery checkpoints. That upload is outbound only, runs only when `HF_TOKEN` is set, and nothing uploaded is read back by the modelling code. No lookup of any business identity happens anywhere.
+- **Output integrity:** `output/candidate_pairs.tsv` is written by the Stage-A prefilter from exactly the pairs Stage-B scores, and the decision layer only removes pairs, so every ID in `matching_results.tsv` appears in `candidate_pairs.tsv` for the same S1. Both files are checked with `utils/validate_submission.py --check-ids` before submission.
+
+## 8. Reproducibility
+
+- **Single entry point:** `python -m src.run_pipeline --skip reranker_train reranker_score loco`, run with `N_JOBS=32 BLOCK_JOBS=3 PREFILTER_JOBS=5 FEATURES_JOBS=5`, regenerates both output files from the raw TSVs. Step-by-step instructions (data placement, environment, model weights, clean start, validation) are in `code/business_entity_resolution/README.md`.
+- **One seed everywhere:** `config.SEED = 42` fixes the R / G / V split, the profiling sample, the FAISS IVF training sample, the Stage-A LightGBM, the Stage-B early-stopping hold-out and Stage-B LightGBM (bagging and feature sub-sampling), and the reranker's negative sampling.
+- **Deterministic stages:** normalisation, abbreviation mining, IDF, TF-IDF and key blocking, feature computation, the threshold grid (order-preserving parallel map with fixed tie-breaking) and the decision layer.
+- **Leakage control:** R, G and V are entity-disjoint; Stage-A and Stage-B train on G only, thresholds are tuned on V only, and Stage-B's early stopping uses an entity-level hold-out inside G.
+- **Pinned environment:** `requirements.txt` pins every library version of the submitted run (Python 3.14.4, Ubuntu, AWS m6i.8xlarge, 32 vCPU, no GPU).
+- **Known variance:** LightGBM and FAISS use multithreaded floating-point reductions and the embeddings depend on the torch build, so a run on different hardware or thread settings can differ slightly on pairs whose score sits exactly at a threshold. The pinned environment and the same thread settings give the closest reproduction of the submitted outputs.
 
 ---
 
@@ -235,11 +246,16 @@ Our pipeline reaches **0.929 macro F<sub>0.5</sub> on a held-out validation spli
 | `src/tune_thresholds.py`, `src/metrics.py` | macro F<sub>0.5</sub> and threshold search on V, France procedure |
 | `src/decide.py` | decision layer; writes `output/matching_results.tsv` |
 
-**Reproduce end to end:**
+**Reproduce end to end** (from the zip root, with the challenge data at `6ab10eb3b23ba_student_resource/student_resource/dataset/`; full steps in the code `README.md`):
 ```bash
+cd code/business_entity_resolution
+pip install -r requirements.txt
+export N_JOBS=32 BLOCK_JOBS=3 PREFILTER_JOBS=5 FEATURES_JOBS=5
 python -m src.run_pipeline --skip reranker_train reranker_score loco
-python3 utils/validate_submission.py --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv --test-dir dataset/test
+cd ../..
+python3 6ab10eb3b23ba_student_resource/student_resource/utils/validate_submission.py \
+    --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv \
+    --test-dir 6ab10eb3b23ba_student_resource/student_resource/dataset/test --check-ids
 ```
 Key environment knobs: `N_JOBS` (CPU threads), `BLOCK_JOBS` (partitions blocked in parallel), `PREFILTER_JOBS` and `FEATURES_JOBS` (partition-level parallelism), `TFIDF_MAX_DF` / `TFIDF_MAX_DF_NAME` (TF-IDF pruning).
 
