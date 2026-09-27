@@ -35,6 +35,7 @@ STAGES = [
     "loco",            # optional: train + score both LOCO variants
     "france",          # France procedure + diagnostics
     "decide",          # write output/matching_results.tsv
+    "stage2",          # optional Stage-C context reranker (adopted only if better on V_b)
 ]
 
 
@@ -172,6 +173,13 @@ def _run(stage: str) -> None:
         (C.REPORTS_DIR / "france_thresholds.json").write_text(
             json.dumps(fr, indent=2), encoding="utf-8"
         )
+
+    elif stage == "stage2":
+        # Stage-C context reranker; replaces the decide output only if it
+        # beats Stage-B on held-out V_b (see src/stage2.py).
+        from . import stage2
+        stage2.run()
+        stage2.decide_test()
 
     elif stage == "decide":
         from . import decide as D, tune_thresholds
