@@ -242,6 +242,7 @@ def train(model_path: Path | None = None):
     if not parts:
         raise RuntimeError("No G-partition blocking candidates found.")
     cands = pd.concat(parts, ignore_index=True)
+    cands = cands.sort_values("_country", kind="stable").reset_index(drop=True)
     print(f"[prefilter] G training pairs: {len(cands):,}")
 
     X_parts = []

@@ -306,8 +306,8 @@ def _pool_keys_locrare(row):
 
 
 def _s1_keys_house(row):
-    hn = getattr(row, "house_number", "") or ""
-    if not hn:
+    hn = getattr(row, "house_number", "")
+    if not isinstance(hn, str) or not hn:
         return []
     return [f"{hn}||{s}" for s in _split_toks(getattr(row, "street_tokens", ""))]
 
@@ -456,11 +456,17 @@ def _process_pool(split: str, country: str, src_tag: str,
     # ---- A1 dense ----
     try:
         _log(f"[blocking]   A1 dense: loading embeddings…")
-        q_vec, _ = embed_mod.load_embeddings(split, "s1", country)
+        q_vec, q_ids = embed_mod.load_embeddings(split, "s1", country)
         q_vec = np.asarray(q_vec)
+        q_ids_arr = q_ids["entity_id"].to_numpy()
         if train_mask is not None:
             q_vec = q_vec[train_mask]
-        p_vec, _ = embed_mod.load_embeddings(split, src_tag.lower(), country)
+            q_ids_arr = q_ids_arr[train_mask]
+        if not np.array_equal(q_ids_arr, s1_ids_arr):
+            raise RuntimeError("S1 embedding ids misaligned with normalized parquet")
+        p_vec, p_ids = embed_mod.load_embeddings(split, src_tag.lower(), country)
+        if not np.array_equal(p_ids["entity_id"].to_numpy(), pool_ids_arr):
+            raise RuntimeError(f"{src_tag} embedding ids misaligned with normalized parquet")
         D, I = _dense_knn(q_vec, np.asarray(p_vec), C.K_DENSE)
         df_a1 = _rows_from_topk(D, I, s1_ids_arr, pool_ids_arr, src_tag,
                                 score_col="dense_score",

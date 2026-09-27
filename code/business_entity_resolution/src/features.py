@@ -96,8 +96,12 @@ def build(split: str, country: str, include_labels: bool = True
         C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet"
     ))
     str_cols = ["all_numbers", "street_tokens", "locality_tokens", "landmark_text", "acronym", "name_domain"]
+    flag_cols = ["address_missing", "postal_missing", "house_number_missing",
+                 "expansion_changed_name", "romanization_ok"]
     for col in str_cols:
         if col in s1_lookup: s1_lookup[col] = s1_lookup[col].fillna("")
+    for col in flag_cols:
+        if col in s1_lookup: s1_lookup[col] = s1_lookup[col].fillna(0)
     
     pools = _load_pool(split, country)
     pool_lookups = {}
@@ -105,6 +109,8 @@ def build(split: str, country: str, include_labels: bool = True
         v = _prep_lookup(v)
         for col in str_cols:
             if col in v: v[col] = v[col].fillna("")
+        for col in flag_cols:
+            if col in v: v[col] = v[col].fillna(0)
         pool_lookups[k] = v
 
     idf = norm_mod.load_idf(split, country)
@@ -271,11 +277,9 @@ def build(split: str, country: str, include_labels: bool = True
         # For each candidate, best rerank among the *other-source* candidates of
         # the same S1 that agree in name/address; approximated by max rerank
         # among opposite-source candidates for the same S1.
-        other = df["cand_source"].map({"S2": "S3", "S3": "S2"})
-        df["_pair"] = list(zip(df["s1_id"], other))
-        best_other = df.groupby(["s1_id", "cand_source"])["f_rerank"].transform("max")
-        df["f_cross_src_best"] = best_other
-        df.drop(columns="_pair", inplace=True)
+        df["f_cross_src_best"] = np.where(df["cand_source"] == "S2",
+                                          df["f_rerank_max_S3"],
+                                          df["f_rerank_max_S2"])
 
     keys = df[["s1_id", "cand_id", "cand_source"]].copy()
     X = df.drop(columns=["s1_id", "cand_id", "cand_source"]).astype("float32")
