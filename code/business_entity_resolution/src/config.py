@@ -112,7 +112,7 @@ K_NAME_TFIDF = 10
 K_ADDR_TFIDF = 10
 KEY_BLOCK_CAP = 200
 KEY_ACRONYM_CAP = 100
-UNION_TOP_N = 40
+UNION_TOP_N: int = int(_os_cpu.environ.get("UNION_TOP_N", "40"))   # per-S1 cap after the arm union
 ENABLE_PHONETIC_ARM = False       # A7; enable only if recall < target
 
 # TF-IDF

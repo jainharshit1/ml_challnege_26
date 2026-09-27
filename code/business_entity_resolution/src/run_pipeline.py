@@ -6,6 +6,7 @@ skip already-materialised parquet files, so you can crash and restart. Use
 """
 from __future__ import annotations
 import argparse
+import os
 import json
 import time
 from pathlib import Path
@@ -86,7 +87,8 @@ def _run(stage: str) -> None:
     elif stage == "block":
         from . import blocking
         blocking.block_all_partitions()
-        blocking.blocking_recall_report()
+        if os.environ.get("BLOCK_RECALL_REPORT", "1") != "0":
+            blocking.blocking_recall_report()
 
     elif stage == "prefilter_train":
         from . import prefilter
