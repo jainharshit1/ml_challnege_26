@@ -11,6 +11,7 @@ Usage (per partition):
     X, keys, y? = build(split, country)
 """
 from __future__ import annotations
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -35,8 +36,44 @@ def _prep_lookup(df: pd.DataFrame) -> pd.DataFrame:
     return df.set_index("entity_id")
 
 
+_PHON_REP = (("sh", "s"), ("ch", "k"), ("kh", "k"), ("gh", "g"), ("th", "t"),
+             ("dh", "d"), ("bh", "b"), ("ph", "p"), ("jh", "j"), ("ck", "k"),
+             ("f", "p"), ("v", "b"), ("w", "b"), ("c", "k"), ("q", "k"),
+             ("z", "j"), ("x", "ks"))
+_PHON_VOWELS = re.compile(r"[aeiouy]")
+_PHON_DOUBLE = re.compile(r"(.)\1+")
+_PHON_NASAL = re.compile(r"m(?=[^aeiouym])")      # anusvara: 'imdastri' ~ 'indastri'
+# consonant skeletons of legal suffixes (incl. transliterated 'praiveta limiteda')
+_PHON_LEGAL = {"prbt", "prbr", "pbt", "lmtd", "lmt", "ltd", "lmrd", "llp", "ink",
+               "inkrprtd", "kmpn", "krprtn", "krp", "ko"}
+
+
+def _phon(name: str) -> str:
+    """Transliteration-robust consonant skeleton of a romanised name.
+
+    Indic names romanised via IAST carry an inherent 'a' after consonants and
+    different consonant spellings than native Latin writing ('sivama inphoteka'
+    vs 'shivam infotech'); both collapse to 'sbm inptk'. Legal suffixes are
+    dropped because they survive transliteration unrecognised.
+    """
+    out = []
+    for t in name.split():
+        t = _PHON_NASAL.sub("n", t)
+        for a, b in _PHON_REP:
+            t = t.replace(a, b)
+        t = _PHON_DOUBLE.sub(r"\1", t[:1] + _PHON_VOWELS.sub("", t[1:]))
+        if t and t not in _PHON_LEGAL:
+            out.append(t)
+    return " ".join(out)
+
+
 DENSE_COS_MISSING = -2.0   # outside cosine range; same value at train and test
 _DENSE_COS_CHUNK = 100_000
+
+
+def _eq_nonempty_list(a: list, b: list) -> np.ndarray:
+    a = np.asarray(a, dtype=object); b = np.asarray(b, dtype=object)
+    return ((a == b) & (a != "")).astype(np.int8)
 
 
 def _positions(ids: np.ndarray, keys: np.ndarray) -> np.ndarray:
@@ -232,6 +269,22 @@ def build(split: str, country: str, include_labels: bool = True
     f_addr_jw = _pd(s_addr, c_addr, JaroWinkler.normalized_similarity)
     f_addr_set = _pd(s_addr, c_addr, rf_fuzz.token_set_ratio, 100.0)
 
+    # Transliteration-robust name similarity on phonetic skeletons
+    _pk: dict = {}
+
+    def _pk_of(x):
+        r = _pk.get(x)
+        if r is None:
+            r = _pk[x] = _phon(x)
+        return r
+
+    s_ph = [_pk_of(x) for x in s_core]
+    c_ph = [_pk_of(x) for x in c_core]
+    del _pk
+    f_name_phon_jw = _pd(s_ph, c_ph, JaroWinkler.normalized_similarity)
+    f_name_phon_set = _pd(s_ph, c_ph, rf_fuzz.token_set_ratio, 100.0)
+    f_name_phon_eq = _eq_nonempty_list(s_ph, c_ph)
+
     # ---- Set-based features: tight loop with memoised tokenisation ----
     _c3: dict = {}
     _tk: dict = {}
@@ -310,6 +363,9 @@ def build(split: str, country: str, include_labels: bool = True
         "f_name_word_jac": f_name_word_jac,
         "f_name_idf_jac": f_name_idf_jac,
         "f_name_core_eq": _eq_nonempty(s_core, c_core),
+        "f_name_phon_jw": f_name_phon_jw,
+        "f_name_phon_set": f_name_phon_set,
+        "f_name_phon_eq": f_name_phon_eq,
         "f_name_sorted_eq": _raw_eq_nonempty("name_sorted"),
         "f_acronym_match": f_acronym_match,
         "f_legal_state": f_legal_state,

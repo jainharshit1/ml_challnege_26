@@ -149,6 +149,12 @@ def _run(stage: str) -> None:
         Path(C.REPORTS_DIR / "thresholds_in_country.json").write_text(
             json.dumps(r, indent=2), encoding="utf-8"
         )
+        # Per-country thresholds for every country present in V (US, India);
+        # unseen countries (France) keep the global / France procedure values.
+        from . import splits as splits_mod
+        sp = splits_mod.load()
+        for c in sorted(sp.loc[sp["group"] == "V", "country"].unique()):
+            tune_thresholds.tune(country=c)
 
     elif stage == "loco":
         from . import train_gbdt, tune_thresholds
@@ -178,11 +184,22 @@ def _run(stage: str) -> None:
             fr = json.loads(fr_path.read_text("utf-8"))
             fr_overrides = (fr["france_pair"], fr["france_singleton"],
                              fr["france_margin"])
+        # Per-country thresholds from this run's tune stage (ignore files
+        # older than the global thresholds: left over from another run).
+        inc_mtime = (C.REPORTS_DIR / "thresholds_in_country.json").stat().st_mtime
+        country_overrides = {}
+        for p in C.REPORTS_DIR.glob("thresholds_country_*.json"):
+            if p.stat().st_mtime >= inc_mtime:
+                t = json.loads(p.read_text("utf-8"))
+                country_overrides[p.stem[len("thresholds_country_"):]] = (
+                    t["pair_thresh"], t["singleton_thresh"], t.get("margin_thresh"))
+        print(f"[decide] per-country thresholds: {country_overrides}")
         D.decide_all_test(
             pair_thresh=inc["pair_thresh"],
             singleton_thresh=inc["singleton_thresh"],
             margin_thresh=inc.get("margin_thresh"),
             france_overrides=fr_overrides,
+            country_overrides=country_overrides,
         )
 
     else:

@@ -82,6 +82,7 @@ def decide_all_test(
     margin_thresh: float | None = None,
     loco_tag: str = "",
     france_overrides: tuple[float, float, float | None] | None = None,
+    country_overrides: dict[str, tuple[float, float, float | None]] | None = None,
 ) -> Path:
     """Apply thresholds to every test country, aggregate, write matching_results.tsv.
 
@@ -100,6 +101,8 @@ def decide_all_test(
         df = pd.read_parquet(p)
         if france_overrides and country == "France":
             pt, st, mg = france_overrides
+        elif country_overrides and country in country_overrides:
+            pt, st, mg = country_overrides[country]
         else:
             pt, st, mg = pair_thresh, singleton_thresh, margin_thresh
         kept = decide(df, pair_thresh=pt, singleton_thresh=st, margin_thresh=mg)

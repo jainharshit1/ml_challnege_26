@@ -39,9 +39,11 @@ def _load_v_scores(loco_tag: str = "") -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
-def _v_ground_truth() -> dict[str, list[str]]:
-    """FULL ground truth restricted to V entities."""
+def _v_ground_truth(country: str | None = None) -> dict[str, list[str]]:
+    """FULL ground truth restricted to V entities (optionally one country)."""
     split_df = splits_mod.load()
+    if country is not None:
+        split_df = split_df[split_df["country"] == country]
     v = set(split_df.loc[split_df["group"] == "V", "entity_id"])
     gt = read_ground_truth(C.TRAIN_GT)
     gt = gt[gt["source1_entity_id"].isin(v)]
@@ -98,11 +100,15 @@ def _grid_eval(scores_v: pd.DataFrame, truths: dict[str, list[str]],
             .sort_values("_i").drop(columns="_i").reset_index(drop=True))
 
 
-def tune(loco_tag: str = "") -> dict:
+def tune(loco_tag: str = "", country: str | None = None) -> dict:
+    """Grid-search thresholds on V; `country` restricts both scores and truth
+    to one country (per-country thresholds, written as thresholds_country_X)."""
     C.ensure_dirs()
-    print(f"[tune] loading V scores (loco_tag={loco_tag!r})…")
+    print(f"[tune] loading V scores (loco_tag={loco_tag!r}, country={country})…")
     scores = _load_v_scores(loco_tag)
-    truths = _v_ground_truth()
+    if country is not None:
+        scores = scores[scores["_country"] == country]
+    truths = _v_ground_truth(country)
 
     print("[tune] coarse grid…")
     coarse = _grid_eval(scores, truths, C.COARSE_PAIR_GRID,
@@ -134,7 +140,7 @@ def tune(loco_tag: str = "") -> dict:
         "pred_singleton_rate": float(best2["pred_singleton_rate"]),
         "mean_matches": float(best2["mean_matches"]),
     }
-    tag = loco_tag or "in_country"
+    tag = f"country_{country}" if country else (loco_tag or "in_country")
     (C.REPORTS_DIR / f"thresholds_{tag}.json").write_text(
         json.dumps(result, indent=2), encoding="utf-8"
     )
