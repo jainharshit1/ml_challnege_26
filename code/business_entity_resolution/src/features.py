@@ -35,6 +35,55 @@ def _prep_lookup(df: pd.DataFrame) -> pd.DataFrame:
     return df.set_index("entity_id")
 
 
+DENSE_COS_MISSING = -2.0   # outside cosine range; same value at train and test
+_DENSE_COS_CHUNK = 100_000
+
+
+def _positions(ids: np.ndarray, keys: np.ndarray) -> np.ndarray:
+    """Row position of each key in `ids` (first occurrence), -1 if absent."""
+    dup = pd.Index(ids).duplicated()
+    uniq_pos = np.flatnonzero(~dup)
+    pos = pd.Index(ids[~dup]).get_indexer(keys)
+    return np.where(pos >= 0, uniq_pos[np.maximum(pos, 0)], -1)
+
+
+def _dense_cos(split: str, country: str, s1_ids: np.ndarray,
+               cand_ids: np.ndarray, src_arr: np.ndarray) -> np.ndarray:
+    """Exact bge-m3 cosine for EVERY candidate pair, not only A1 hits.
+
+    Reads the fp16 embedding memmaps written by the embed stage (vectors are
+    unit-norm, so cosine = dot). Pairs whose embeddings are unavailable get
+    DENSE_COS_MISSING; any failure degrades to that value instead of raising,
+    so the feature column always exists with identical semantics.
+    """
+    from . import embed as embed_mod
+    n = len(s1_ids)
+    out = np.full(n, DENSE_COS_MISSING, dtype=np.float32)
+    try:
+        q_vec, q_ids = embed_mod.load_embeddings(split, "s1", country)
+        q_pos = _positions(q_ids["entity_id"].to_numpy(), s1_ids)
+    except Exception as e:
+        print(f"[features] {split}/{country}: dense cos unavailable for S1 "
+              f"({type(e).__name__}: {e}); using {DENSE_COS_MISSING}", flush=True)
+        return out
+    for src in pd.unique(src_arr):
+        rows = np.flatnonzero(src_arr == src)
+        try:
+            p_vec, p_ids = embed_mod.load_embeddings(split, str(src).lower(), country)
+            c_pos = _positions(p_ids["entity_id"].to_numpy(), cand_ids[rows])
+            ok = (q_pos[rows] >= 0) & (c_pos >= 0)
+            rows, qp, cp = rows[ok], q_pos[rows][ok], c_pos[ok]
+            for s in range(0, len(rows), _DENSE_COS_CHUNK):
+                e = s + _DENSE_COS_CHUNK
+                a = np.asarray(q_vec[qp[s:e]], dtype=np.float32)
+                b = np.asarray(p_vec[cp[s:e]], dtype=np.float32)
+                out[rows[s:e]] = np.einsum("ij,ij->i", a, b)
+        except Exception as e:
+            print(f"[features] {split}/{country}: dense cos unavailable for {src} "
+                  f"({type(e).__name__}: {e}); using {DENSE_COS_MISSING}", flush=True)
+    return out
+
+
 def _idf_sum(tokens: list[str], idf: dict[str, float]) -> float:
     return float(sum(idf.get(t, 0.0) for t in tokens))
 
@@ -292,6 +341,8 @@ def build(split: str, country: str, include_labels: bool = True
 
         # ---- Model scores ----
         "f_dense_score": cand["dense_score"].fillna(-1.0).to_numpy(),
+        "f_dense_cos": _dense_cos(split, country, cand["s1_id"].to_numpy(),
+                                  cand["cand_id"].to_numpy(), src_arr),
         "f_stage_a": cand["stage_a_score"].astype(float).to_numpy(),
         "f_rerank": cand["rerank_score"].fillna(-1.0).to_numpy(),
 
