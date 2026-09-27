@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
-**Team Name:** ⟨TBD: team name⟩
-**Team Members:** ⟨TBD: members⟩
+**Team Name:** Titans
+**Team Members:** Harshit Jain, Divyansh Jain, Shivam, Shreeya Deolia (Indian Institute of Technology Mandi)
 **Submission Date:** 27 September 2026
 
 ---
@@ -103,10 +103,10 @@ A 300-tree LightGBM trained on group G scores every blocked pair. It uses 9 chea
 
 ### 3.4 Candidate statistics
 
-- **Candidate pairs generated (test):** ⟨TBD: after blocking, ≤ 40 / S1⟩ → **⟨TBD: after prefilter, ≤ 12 / S1⟩** in `candidate_pairs.tsv`
-- **Reduction ratio vs. all within-country pairs:** ⟨TBD⟩
-- **Blocking recall on train G ∪ V** (fraction of true pairs present among the ≤ 40 candidates, counting S1s with zero candidates as misses): US ⟨TBD⟩, India ⟨TBD⟩
-- **Prefilter recall on V** (after the top-12 cut): ⟨TBD⟩ (loss vs. blocking ⟨TBD⟩)
+- **Candidate pairs generated (test, 1,732,544 S1 entities):** 69.30M after blocking (40 / S1: France 10.38M, India 32.40M, US 26.52M) → **20,790,528 in `candidate_pairs.tsv`** (12 / S1, every S1 has candidates) → 5,338,676 predicted matches
+- **Reduction ratio vs. all within-country pairs:** 6.72 × 10¹² possible pairs → 2.08 × 10⁷ candidates, i.e. **99.99969 %** of the comparison space removed
+- **Blocking recall on train G ∪ V** (fraction of true pairs present among the ≤ 40 candidates, counting S1s with zero candidates as misses): **US 0.9692** (1,553,016 / 1,602,386), **India 0.8880** (951,193 / 1,071,105), overall 0.9367
+- **Prefilter recall on V** (after the top-12 cut): **0.9360**, against 0.9368 before the cut, so the prefilter costs only **0.08 points** of recall while shrinking the candidate set 3.3×
 
 ### 3.5 How we made sure true matches were not lost
 
@@ -164,7 +164,7 @@ The codebase includes a cross-encoder stage (`src/reranker_train.py`, `src/reran
 
 - Country is treated as an open set of string labels. Partitions are discovered from the data, and nothing is hard-coded to {US, India}.
 - No country feature exists, so the model's decisions rest on string and structural evidence that carries over across countries. The seed abbreviation list includes French forms (`ste`→`societe`, `ets`→`etablissements`, `cie`→`compagnie`), and normalisation strips accents.
-- **Threshold transfer:** the code supports leave-one-country-out (LOCO) tuning, which trains on one country and tunes on the other to measure how much optimal thresholds move for an unseen country. For the final run we used the in-country thresholds ⟨TBD: or LOCO-adjusted if run⟩, and checked France predictions with unsupervised diagnostics: predicted singleton rate ⟨TBD⟩ and mean matches per entity ⟨TBD⟩, against the training reference of 5.58 % and 3.46.
+- **Threshold transfer:** the code supports leave-one-country-out (LOCO) tuning, which trains on one country and tunes on the other to measure how much optimal thresholds move for an unseen country. For the final run we used the in-country thresholds (LOCO was not run within the compute budget; stale LOCO files are explicitly ignored), and checked France predictions with unsupervised diagnostics: **predicted singleton rate 5.33 % and 3.20 mean matches per entity** over 259,452 France S1 entities, against 5.58 % and 3.46 in the training labels. The close agreement suggests the thresholds carry over to the unseen country without systematic over- or under-matching.
 
 ---
 
@@ -174,27 +174,36 @@ All scores are on the entity-disjoint **V split** and computed with the official
 
 | Metric | US | India | Overall |
 |---|---|---|---|
-| Blocking recall (G ∪ V, ≤ 40 cand.) | ⟨TBD⟩ | ⟨TBD⟩ | ⟨TBD⟩ |
-| Prefilter recall (V, top-12) | | | ⟨TBD⟩ |
-| **Macro F<sub>0.5</sub> (V)** | | | **⟨TBD⟩** |
-| Singleton F<sub>0.5</sub> (V) | | | ⟨TBD⟩ |
-| Non-singleton F<sub>0.5</sub> (V) | | | ⟨TBD⟩ |
-| Predicted singleton rate / true | | | ⟨TBD⟩ / 5.58 % |
-| Mean predicted matches / true | | | ⟨TBD⟩ / 3.46 |
-| Public leaderboard F<sub>0.5</sub> | | | ⟨TBD⟩ |
+| Blocking recall (G ∪ V, ≤ 40 cand.) | 0.9692 | 0.8880 | 0.9367 |
+| Prefilter recall (V, top-12) | 0.9689 | 0.8868 | 0.9360 |
+| **Macro F<sub>0.5</sub> (V)** | **0.9461** | **0.9026** | **0.9287** |
+| Singleton F<sub>0.5</sub> (V) | 0.9245 | 0.8971 | 0.9135 |
+| Non-singleton F<sub>0.5</sub> (V) | 0.9474 | 0.9029 | 0.9296 |
+| Pair precision / pair recall (V) | 0.978 / 0.901 | 0.971 / 0.821 | |
+| Predicted singleton rate / true | | | 6.90 % / 5.58 % |
+| Mean predicted matches / true | | | 3.08 / 3.46 |
+| **Public leaderboard F<sub>0.5</sub>** (test incl. France) | | | **0.914** |
 
-**Tuned thresholds:** pair ⟨TBD⟩, singleton ⟨TBD⟩, margin ⟨TBD⟩.
+**Tuned thresholds:** pair 0.66, singleton 0.66, margin 0.05. Stage-B early-stopped at iteration 92 (validation log-loss 0.0623, AUC 0.9968).
 
-**Most important features (gain):** ⟨TBD: top 10 from `artifacts/models/stage_b_feature_importance.tsv`⟩
+**Most important features (gain):** `f_stage_a`, `f_rerank` (Stage-A-derived rerank signal), `f_name_jw_exp`, `f_legal_state`, `f_cand_gap_to_best`, `f_rerank_gap_best`, `f_name_freq`, `f_cand_rank_among_competitors`, `f_addr_jw`, `f_cand_competitors`. Three of the top ten are **competition features** (candidate-side gap, rank and number of competitors), which confirms that listwise context, not just pairwise similarity, drives precision.
 
-- **Common false positives (wrong merges):** ⟨TBD from V error analysis⟩
-- **Common false negatives (missed matches):** ⟨TBD from V error analysis⟩
+**Where the remaining error comes from** (share of true V pairs):
+
+| | US | India |
+|---|---|---|
+| Lost at blocking (never a candidate) | 3.06 % | 11.19 % |
+| Cut by the Stage-A top-12 | 0.05 % | 0.13 % |
+| Rejected by the model / decision layer | 6.80 % | 6.55 % |
+
+- **Common false positives (wrong merges):** pair precision is already high (0.978 US, 0.971 India). The dominant pattern is **chain confusion**: 32 % (US) and 18 % (India) of wrong merges have an *identical* core name, i.e. another branch of the same brand at a different address. In India a further 18 % involve transliterated (non-Latin) candidate names. Only 7–8 % of wrong merges land on true singletons, and 7.6 % (US) / 10.3 % (India) of true singletons receive a spurious match.
+- **Common false negatives (missed matches):** India's gap to the US is almost entirely **blocking recall** (11.2 % of true pairs never become candidates, against 3.1 %). We diagnosed these misses directly: **every missed pair belongs to an S1 whose 40 union slots were full**, and the missed candidates are the ones only a single arm finds. In India, 54 % of them have a **non-Latin (transliterated) name**, so only the dense arm can see them, and their dense cosine is lower (median 0.70 vs 0.92 for found pairs). In the US, 54 % have an **empty address**, so the address arm cannot see them. These S1 entities also have more true matches (4.1 vs 3.7), so the per-S1 cap binds exactly where it hurts. Model-side misses (about 6.7 %) are mostly conservative rejections from the precision-weighted thresholds: 20–28 % of them share the exact core name with the S1 and are rejected because a same-name chain branch is equally plausible, which is the right trade under F<sub>0.5</sub>.
 
 ---
 
 ## 6. Conclusion
 
-⟨TBD: 2–3 sentences once final numbers are in.⟩ The central lessons: **recall is decided at blocking** (every arm covers a different kind of noise, so the union matters more than any one arm); **F<sub>0.5</sub> is decided at the decision layer** (the one-to-one and singleton structure measured in the training labels is worth more than extra model capacity); and **engineering for scale** (sparse top-k in C++, quantised ANN, vectorised features, parallel partitions) is what made a 10M-record, three-country problem fit on a single CPU machine within the time limit.
+Our pipeline reaches **0.929 macro F<sub>0.5</sub> on a held-out validation split and 0.914 on the public leaderboard**. It runs end to end on a single CPU machine, with 99.9997 % of the comparison space removed at 0.08 points of prefilter recall loss, and it generalises to the unseen France partition with singleton and match-count statistics that closely track the training labels. The error analysis points clearly at the next gain: a larger or arm-reserved candidate budget for single-arm hits (transliterated names, empty addresses), since blocking, not the matcher, bounds India. The central lessons: **recall is decided at blocking** (every arm covers a different kind of noise, so the union matters more than any one arm); **F<sub>0.5</sub> is decided at the decision layer** (the one-to-one and singleton structure measured in the training labels is worth more than extra model capacity); and **engineering for scale** (sparse top-k in C++, quantised ANN, vectorised features, parallel partitions) is what made a 10M-record, three-country problem fit on a single CPU machine within the time limit.
 
 ---
 
@@ -236,7 +245,17 @@ Key environment knobs: `N_JOBS` (CPU threads), `BLOCK_JOBS` (partitions blocked 
 
 ### B. Additional Results
 
-**Stage wall-clock times** on an AWS m6i.8xlarge (32 vCPU, 128 GB RAM, no GPU): ⟨TBD from `artifacts/reports/stage_timings.json`⟩
+**Stage wall-clock times** on an AWS m6i.8xlarge (32 vCPU, 128 GB RAM, no GPU), from `artifacts/reports/stage_timings.json`:
+
+| Stage | Time |
+|---|---|
+| normalize (two passes) + abbreviation mining | 11.7 + 11.7 + 24.2 min |
+| embed (bge-m3, computed once and reused) | 178 min |
+| block (5 partitions, 3 in parallel) | 91.7 min |
+| prefilter train / score | 6.4 / 8.5 min |
+| features (63, 5 partitions in parallel) | 11.1 min |
+| gbdt train / score | 15.0 / 0.3 min |
+| tune + france + decide | 1.6 + 0.1 + 0.6 min |
 
 **Engineering note on the address arm** (top-k time per pool, measured on India):
 

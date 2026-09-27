@@ -46,9 +46,45 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-Install the CUDA-matching wheels for `torch` and `faiss-gpu` for your host.
-On CPU-only, `faiss-cpu` will be picked from the requirements file, but the
-dense arm and cross-encoder will be slow.
+`requirements.txt` pins the exact environment of the submitted run (Python
+3.14.4, Ubuntu). LightGBM additionally needs the system OpenMP runtime:
+`sudo apt-get install -y libgomp1`. The pinned `faiss-gpu` wheel runs on CPU
+when no GPU is present.
+
+The dense encoder `BAAI/bge-m3` is loaded from `DENSE_MODEL_LOCAL` in
+`src/config.py`; set it to `None` to fetch it from the Hugging Face hub once,
+or point it to a local copy for fully offline runs.
+
+## Reproduce the submitted run (Team Titans)
+
+Data layout expected by `src/config.py` (paths are relative to the repository root):
+
+```
+6ab10eb3b23ba_student_resource/student_resource/dataset/{train,test}/*.tsv
+```
+
+Exact command and settings that produced `output/matching_results.tsv` and
+`output/candidate_pairs.tsv` (AWS m6i.8xlarge, 32 vCPU, 128 GB RAM, no GPU):
+
+```bash
+cd code/business_entity_resolution
+export N_JOBS=32 BLOCK_JOBS=3 PREFILTER_JOBS=5 FEATURES_JOBS=5
+python -m src.run_pipeline --skip reranker_train reranker_score loco
+```
+
+- The cross-encoder stages are skipped (CPU-only budget); Stage-B then uses the
+  Stage-A score as its rerank signal.
+- `loco` is skipped; France uses the in-country thresholds.
+- Wall-clock on that machine: embeddings ~3 h (computed once), blocking ~92 min,
+  everything after blocking ~45 min.
+- Validate before submitting (from `student_resource/`):
+  `python3 utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test --check-ids`
+
+Useful knobs (environment variables): `N_JOBS` (threads), `BLOCK_JOBS`
+(partitions blocked in parallel), `PREFILTER_JOBS` / `FEATURES_JOBS`
+(partition-level parallelism), `TFIDF_MAX_DF` / `TFIDF_MAX_DF_NAME` (TF-IDF
+pruning), `UNION_TOP_N` (per-S1 candidate cap after blocking, default 40),
+`BLOCK_TRAIN_GROUPS` (train S1 groups to block, default `G,V`).
 
 ## The one knob you'll touch
 

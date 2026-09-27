@@ -1,28 +1,35 @@
-# Core scientific stack — let pip resolve compatible versions.
-# Minimum bounds ensure API compatibility; no upper caps.
-numpy>=1.24
-pandas>=2.0
-pyarrow>=12.0
-scipy>=1.10
-scikit-learn>=1.3
-rapidfuzz>=3.0
-anyascii>=0.3
-indic-transliteration>=2.3
-tqdm>=4.60
+# Pinned to the exact environment that produced the submitted outputs:
+# AWS m6i.8xlarge (32 vCPU, 128 GB RAM, no GPU), Ubuntu, Python 3.14.4.
+# System package required by LightGBM:  sudo apt-get install -y libgomp1
+
+# Core scientific stack
+numpy==2.5.3
+pandas==3.0.6
+pyarrow==25.0.1
+scipy==1.18.1
+scikit-learn==1.9.1
+joblib==1.6.0
+threadpoolctl==3.7.0
+tqdm==4.70.1
+
+# Normalisation / string similarity
+rapidfuzz==3.14.6
+anyascii==0.3.3
+indic_transliteration==2.3.82
 
 # Blocking
-sparse_dot_topn>=1.0
+sparse-dot-topn==1.2.0
+faiss-gpu==1.15.1          # runs on CPU when no GPU is present (as in the submitted run)
 
-# FAISS — GPU build on Linux, CPU fallback elsewhere
-faiss-gpu>=1.7.2 ; platform_system == "Linux"
-faiss-cpu>=1.7.2 ; platform_system != "Linux"
+# GBDT (Stage-A prefilter, Stage-B matcher)
+lightgbm==4.7.0
 
-# GBDT
-lightgbm>=4.0
-
-# Deep learning (reranker + dense encoder)
-torch>=2.0
-transformers>=4.38
-sentence-transformers>=2.7
-FlagEmbedding>=1.2
-accelerate>=0.28
+# Dense encoder (bge-m3 embeddings) and optional cross-encoder reranker
+torch==2.14.0
+transformers==5.17.0
+tokenizers==0.23.2
+safetensors==0.8.0
+sentence-transformers==6.1.0
+FlagEmbedding==1.4.2
+accelerate==1.15.0
+huggingface_hub==1.33.0
