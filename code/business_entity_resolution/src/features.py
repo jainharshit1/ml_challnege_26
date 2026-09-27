@@ -95,8 +95,17 @@ def build(split: str, country: str, include_labels: bool = True
     s1_lookup = _prep_lookup(pd.read_parquet(
         C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet"
     ))
+    str_cols = ["all_numbers", "street_tokens", "locality_tokens", "landmark_text", "acronym", "name_domain"]
+    for col in str_cols:
+        if col in s1_lookup: s1_lookup[col] = s1_lookup[col].fillna("")
+    
     pools = _load_pool(split, country)
-    pool_lookups = {k: _prep_lookup(v) for k, v in pools.items()}
+    pool_lookups = {}
+    for k, v in pools.items():
+        v = _prep_lookup(v)
+        for col in str_cols:
+            if col in v: v[col] = v[col].fillna("")
+        pool_lookups[k] = v
 
     idf = norm_mod.load_idf(split, country)
     name_freq = _name_freq_map(split, country)

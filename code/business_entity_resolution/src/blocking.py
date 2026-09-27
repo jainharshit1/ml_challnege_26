@@ -251,7 +251,7 @@ def _sparse_topk(mat_q: sp.csr_matrix, mat_p: sp.csr_matrix,
 # Key arms (A4 / A5 / A6)
 # ---------------------------------------------------------------------------
 def _split_toks(x: str | None) -> list[str]:
-    if not x:
+    if not isinstance(x, str) or not x:
         return []
     return [t for t in x.split() if t]
 
@@ -444,7 +444,7 @@ KEEP_COLS = [
 
 def _process_pool(split: str, country: str, src_tag: str,
                   s1: pd.DataFrame, s1_ids_arr: np.ndarray,
-                  pool_path: Path) -> list[pd.DataFrame]:
+                  pool_path: Path, train_mask=None) -> list[pd.DataFrame]:
     """Run all six arms for a single pool (S2 or S3). Returns arm frames."""
     pool = pd.read_parquet(pool_path, columns=KEEP_COLS)
     pool_ids_arr = pool["entity_id"].to_numpy()
@@ -457,8 +457,11 @@ def _process_pool(split: str, country: str, src_tag: str,
     try:
         _log(f"[blocking]   A1 dense: loading embeddings…")
         q_vec, _ = embed_mod.load_embeddings(split, "s1", country)
+        q_vec = np.asarray(q_vec)
+        if train_mask is not None:
+            q_vec = q_vec[train_mask]
         p_vec, _ = embed_mod.load_embeddings(split, src_tag.lower(), country)
-        D, I = _dense_knn(np.asarray(q_vec), np.asarray(p_vec), C.K_DENSE)
+        D, I = _dense_knn(q_vec, np.asarray(p_vec), C.K_DENSE)
         df_a1 = _rows_from_topk(D, I, s1_ids_arr, pool_ids_arr, src_tag,
                                 score_col="dense_score",
                                 rank_col="dense_rank",
@@ -567,13 +570,15 @@ def block_partition(split: str, country: str) -> pd.DataFrame:
 
     s1 = pd.read_parquet(s1_path, columns=KEEP_COLS)
 
+    train_mask = None
     # NEW: Drop "unused" rows from S1 for the train split to cut work by 50%
     if split == "train":
         from . import splits as splits_mod
         split_df = splits_mod.load()
         valid_ids = set(
             split_df.loc[split_df["group"].isin(["G", "V", "R"]), "entity_id"])
-        s1 = s1[s1["entity_id"].isin(valid_ids)].reset_index(drop=True)
+        train_mask = s1["entity_id"].isin(valid_ids).to_numpy()
+        s1 = s1[train_mask].reset_index(drop=True)
 
     s1_ids_arr = s1["entity_id"].to_numpy()
     _log(f"[blocking] === {split}/{country}: {len(s1_ids_arr):,} S1 rows ===")
@@ -584,7 +589,7 @@ def block_partition(split: str, country: str) -> pd.DataFrame:
         if not pool_path.exists():
             continue
         frames = _process_pool(split, country, src_tag,
-                               s1, s1_ids_arr, pool_path)
+                               s1, s1_ids_arr, pool_path, train_mask)
         all_frames.extend(frames)
         del frames
         gc.collect()
