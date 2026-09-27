@@ -120,15 +120,31 @@ TFIDF_NGRAM = (3, 4)
 TFIDF_MIN_DF = 2
 TFIDF_MAX_FEATURES = 400_000
 TFIDF_ROW_BATCH = 20_000           # sparse top-k row batch
+# Drop n-grams present in more than this fraction of records. Very common
+# n-grams (road/nagar/street, city names) dominate sparse matmul cost while
+# carrying little signal (low IDF). Env-overridable.
+TFIDF_MAX_DF: float = float(_os_cpu.environ.get("TFIDF_MAX_DF", "0.02"))            # address arm
+TFIDF_MAX_DF_NAME: float = float(_os_cpu.environ.get("TFIDF_MAX_DF_NAME", "0.01"))  # name arm
+TFIDF_TOPN_BATCH = 50_000          # query rows per sp_matmul_topn call (progress/ETA)
+# Address arm on word uni+bigrams: ~5x fewer nnz than char 3-4 grams and far
+# shorter posting lists; typo-robust matching is left to the name/dense arms.
+TFIDF_ADDR_ANALYZER: str = _os_cpu.environ.get("TFIDF_ADDR_ANALYZER", "word")
+TFIDF_ADDR_NGRAM = (1, 2) if TFIDF_ADDR_ANALYZER == "word" else TFIDF_NGRAM
+
+# Partitions blocked in parallel (each gets N_JOBS / BLOCK_JOBS threads).
+BLOCK_JOBS: int = int(_os_cpu.environ.get("BLOCK_JOBS", "3"))
+# Train S1 groups to block. R only feeds reranker fine-tuning.
+BLOCK_TRAIN_GROUPS = tuple(_os_cpu.environ.get("BLOCK_TRAIN_GROUPS", "G,V").split(","))
 
 # FAISS
-FAISS_NLIST = 4096
-FAISS_TRAIN_SAMPLE = 200_000
-FAISS_NPROBE_DEFAULT = 32
+FAISS_NLIST = 2048                 # same vectors scanned at nprobe 16 as 4096/32; 4x cheaper train
+FAISS_TRAIN_SAMPLE = 100_000
+FAISS_NPROBE_DEFAULT = 16
 FAISS_NPROBE_TARGET_OVERLAP = 0.99
+FAISS_SQ_FP16 = True               # IVF with fp16 codes (lossless for fp16 embeddings)
 
-# Small partitions (like France) use IndexFlatIP; threshold in n_vectors:
-FAISS_FLAT_MAX = 1_000_000
+# Small partitions use IndexFlatIP (exact, brute force); threshold in n_vectors:
+FAISS_FLAT_MAX = 200_000
 
 # ----------------------------- Stage-A prefilter (§5) -----------------------
 PREFILTER_TOP_N = 12               # start; raise to 15-20 if recall loss > 0.5 pts

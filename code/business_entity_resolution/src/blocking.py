@@ -29,6 +29,7 @@ import gc
 import os
 import sys
 import threading
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -88,9 +89,12 @@ ARM_COLS = [
 ]
 
 
+_TAG = ""   # set per worker when partitions run in parallel
+
+
 def _log(msg: str) -> None:
     """Force-flushed print so buffered stdout doesn't hide progress."""
-    print(msg, flush=True)
+    print(f"{_TAG}{msg}", flush=True)
     sys.stdout.flush()
 
 
@@ -127,8 +131,15 @@ def _dense_knn(query_vecs: np.ndarray, pool_vecs: np.ndarray,
     else:
         quantizer = faiss.IndexFlatIP(d)
         nlist = min(C.FAISS_NLIST, max(64, int(np.sqrt(n_pool) * 4)))
-        index = faiss.IndexIVFFlat(quantizer, d, nlist,
-                                   faiss.METRIC_INNER_PRODUCT)
+        if C.FAISS_SQ_FP16:
+            # Vectors are stored as fp16 on disk, so fp16 codes are lossless
+            # and halve index memory / scan bandwidth vs IVFFlat (fp32).
+            index = faiss.IndexIVFScalarQuantizer(
+                quantizer, d, nlist, faiss.ScalarQuantizer.QT_fp16,
+                faiss.METRIC_INNER_PRODUCT)
+        else:
+            index = faiss.IndexIVFFlat(quantizer, d, nlist,
+                                       faiss.METRIC_INNER_PRODUCT)
         rng = np.random.default_rng(C.SEED)
         train_n = min(C.FAISS_TRAIN_SAMPLE, n_pool)
         train_idx = rng.choice(n_pool, size=train_n, replace=False)
@@ -141,7 +152,8 @@ def _dense_knn(query_vecs: np.ndarray, pool_vecs: np.ndarray,
         del train_sample
         gc.collect()
         index.nprobe = C.FAISS_NPROBE_DEFAULT
-        idx_kind = f"IVFFlat(nlist={nlist}, nprobe={index.nprobe})"
+        idx_kind = (f"IVF{'SQfp16' if C.FAISS_SQ_FP16 else 'Flat'}"
+                    f"(nlist={nlist}, nprobe={index.nprobe})")
 
     _log(
         f"[blocking]   FAISS index kind: {idx_kind}  d={d}  n_pool={n_pool:,}")
@@ -186,15 +198,40 @@ def _dense_knn(query_vecs: np.ndarray, pool_vecs: np.ndarray,
 # ---------------------------------------------------------------------------
 # Sparse TF-IDF arms (A2 / A3)
 # ---------------------------------------------------------------------------
-def _fit_tfidf(texts: Iterable[str]) -> TfidfVectorizer:
-    return TfidfVectorizer(
-        analyzer="char_wb",
-        ngram_range=C.TFIDF_NGRAM,
+def _tfidf_mats(texts_p: list[str], texts_q: list[str], analyzer: str,
+                ngram_range: tuple[int, int], max_df: float
+                ) -> tuple[sp.csr_matrix, sp.csr_matrix]:
+    """Fit on pool+query and return (mat_p, mat_q) from ONE analyzer pass
+    (fit_transform + row slice instead of fit, transform, transform)."""
+    mat = TfidfVectorizer(
+        analyzer=analyzer,
+        ngram_range=ngram_range,
         min_df=C.TFIDF_MIN_DF,
+        max_df=max_df,
         max_features=C.TFIDF_MAX_FEATURES,
         norm="l2",
         sublinear_tf=True,
-    ).fit(texts)
+        dtype=np.float32,
+    ).fit_transform(texts_p + texts_q).tocsr()
+    n_p = len(texts_p)
+    return mat[:n_p], mat[n_p:]
+
+
+def _fill_topk(out: sp.csr_matrix, D: np.ndarray, I: np.ndarray,
+               offset: int) -> None:
+    """Scatter a sorted top-k CSR block into D/I rows [offset, offset+n)."""
+    indptr = out.indptr
+    row_lens = np.diff(indptr)                       # entries per row
+    total = int(row_lens.sum())
+    if total == 0:
+        return
+    row_ids = offset + np.repeat(np.arange(len(row_lens), dtype=np.int64),
+                                 row_lens)
+    # Position within row: (position in flat data) - (start of that row)
+    starts = indptr[:-1].astype(np.int64)
+    positions = np.arange(total, dtype=np.int64) - starts.repeat(row_lens)
+    D[row_ids, positions] = out.data
+    I[row_ids, positions] = out.indices
 
 
 def _sparse_topk(mat_q: sp.csr_matrix, mat_p: sp.csr_matrix,
@@ -202,36 +239,34 @@ def _sparse_topk(mat_q: sp.csr_matrix, mat_p: sp.csr_matrix,
                  ) -> tuple[np.ndarray, np.ndarray]:
     """Cosine top-k of q rows against p rows (both L2-normalised).
 
-    Uses sparse_dot_topn when available. Vectorized extraction (no Python
-    per-row loop) via np.repeat + cumsum on the CSR indptr.
+    Uses sparse_dot_topn when available, in query-row batches so progress
+    and ETA are logged. Only a missing library triggers the dense fallback
+    (the fallback densifies row_batch x n_pool and would OOM on big pools).
     """
     n_q = mat_q.shape[0]
     D = np.zeros((n_q, k), dtype=np.float32)
     I = np.full((n_q, k), -1, dtype=np.int64)
     try:
         from sparse_dot_topn import sp_matmul_topn  # type: ignore
-        pT = mat_p.T.tocsr()
-        out = sp_matmul_topn(mat_q, pT, top_n=k, threshold=0.20,
-                             n_threads=C.N_JOBS, sort=True).tocsr()
-
-        indptr = out.indptr
-        row_lens = np.diff(indptr)                       # entries per row
-        total = int(row_lens.sum())
-        if total == 0:
-            return D, I
-
-        # Flat row assignment via np.repeat (C-level, fast)
-        row_ids = np.repeat(np.arange(n_q, dtype=np.int64), row_lens)
-        # Position within row: (position in flat data) - (start of that row)
-        starts = indptr[:-1].astype(np.int64)
-        positions = np.arange(total, dtype=np.int64) - starts.repeat(row_lens)
-
-        D[row_ids, positions] = out.data
-        I[row_ids, positions] = out.indices
-        return D, I
     except Exception as e:
+        sp_matmul_topn = None
         _log(f"[blocking]   sparse_dot_topn unavailable ({type(e).__name__}); "
              "falling back to chunked matmul")
+
+    if sp_matmul_topn is not None:
+        pT = mat_p.T.tocsr()
+        _log(f"[blocking]     nnz q={mat_q.nnz:,} p={mat_p.nnz:,}")
+        t0 = time.time()
+        for start in range(0, n_q, C.TFIDF_TOPN_BATCH):
+            end = min(start + C.TFIDF_TOPN_BATCH, n_q)
+            out = sp_matmul_topn(mat_q[start:end], pT, top_n=k, threshold=0.20,
+                                 n_threads=C.N_JOBS, sort=True).tocsr()
+            _fill_topk(out, D, I, start)
+            el = time.time() - t0
+            _log(f"[blocking]     top-k {end:,}/{n_q:,}  "
+                 f"{el / 60:.1f} min, ETA {el / end * (n_q - end) / 60:.1f} min")
+        return D, I
+    else:
         pT = mat_p.T
         for start in range(0, n_q, row_batch):
             end = min(start + row_batch, n_q)
@@ -482,12 +517,9 @@ def _process_pool(split: str, country: str, src_tag: str,
 
     # ---- A2 name TF-IDF ----
     _log(f"[blocking]   A2 name TF-IDF: fitting…")
-    name_texts_pool = pool["core_name"].fillna("").tolist()
-    name_texts_q = s1["core_name"].fillna("").tolist()
-    vec_name = _fit_tfidf(name_texts_pool + name_texts_q)
-    mat_p = vec_name.transform(name_texts_pool)
-    mat_q = vec_name.transform(name_texts_q)
-    del name_texts_pool, name_texts_q, vec_name
+    mat_p, mat_q = _tfidf_mats(pool["core_name"].fillna("").tolist(),
+                               s1["core_name"].fillna("").tolist(),
+                               "char_wb", C.TFIDF_NGRAM, C.TFIDF_MAX_DF_NAME)
     gc.collect()
     _log(
         f"[blocking]   A2 name TF-IDF: top-k on q{mat_q.shape} p{mat_p.shape}…")
@@ -505,12 +537,10 @@ def _process_pool(split: str, country: str, src_tag: str,
 
     # ---- A3 address TF-IDF ----
     _log(f"[blocking]   A3 addr TF-IDF: fitting…")
-    addr_texts_pool = pool["address_expanded"].fillna("").tolist()
-    addr_texts_q = s1["address_expanded"].fillna("").tolist()
-    vec_addr = _fit_tfidf(addr_texts_pool + addr_texts_q)
-    mat_p = vec_addr.transform(addr_texts_pool)
-    mat_q = vec_addr.transform(addr_texts_q)
-    del addr_texts_pool, addr_texts_q, vec_addr
+    mat_p, mat_q = _tfidf_mats(pool["address_expanded"].fillna("").tolist(),
+                               s1["address_expanded"].fillna("").tolist(),
+                               C.TFIDF_ADDR_ANALYZER, C.TFIDF_ADDR_NGRAM,
+                               C.TFIDF_MAX_DF)
     gc.collect()
     _log(
         f"[blocking]   A3 addr TF-IDF: top-k on q{mat_q.shape} p{mat_p.shape}…")
@@ -577,12 +607,13 @@ def block_partition(split: str, country: str) -> pd.DataFrame:
     s1 = pd.read_parquet(s1_path, columns=KEEP_COLS)
 
     train_mask = None
-    # NEW: Drop "unused" rows from S1 for the train split to cut work by 50%
+    # Train split: keep only S1 groups that downstream stages use
+    # (BLOCK_TRAIN_GROUPS; R is only needed when the reranker is trained).
     if split == "train":
         from . import splits as splits_mod
         split_df = splits_mod.load()
-        valid_ids = set(
-            split_df.loc[split_df["group"].isin(["G", "V", "R"]), "entity_id"])
+        valid_ids = set(split_df.loc[
+            split_df["group"].isin(list(C.BLOCK_TRAIN_GROUPS)), "entity_id"])
         train_mask = s1["entity_id"].isin(valid_ids).to_numpy()
         s1 = s1[train_mask].reset_index(drop=True)
 
@@ -624,15 +655,38 @@ def block_partition(split: str, country: str) -> pd.DataFrame:
     return out
 
 
+def _block_worker(split: str, country: str, n_threads: int) -> str:
+    """Loky worker entry: one partition with a share of the cores."""
+    global _TAG
+    C.N_JOBS = n_threads
+    _TAG = f"[{split}/{country}] "
+    block_partition(split, country)
+    return f"{split}/{country}"
+
+
 def block_all_partitions() -> None:
     countries = sorted({p.stem.split("__")[-1] for p in
                         C.NORMALIZED_DIR.glob("*__s1__*.parquet")})
     _log(f"[blocking] countries detected: {countries}")
-    for split in ("train", "test"):
-        for country in countries:
-            if not (C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet").exists():
-                continue
+    jobs = [(split, country) for split in ("train", "test") for country in countries
+            if (C.NORMALIZED_DIR / f"{split}__s1__{country}.parquet").exists()]
+    # Biggest pools first so the slowest partition starts immediately.
+    def _size(sc):
+        return sum(p.stat().st_size for p in
+                   C.NORMALIZED_DIR.glob(f"{sc[0]}__s[23]__{sc[1]}.parquet"))
+    jobs.sort(key=_size, reverse=True)
+    n_jobs = max(1, min(C.BLOCK_JOBS, len(jobs)))
+    if n_jobs == 1:
+        for split, country in jobs:
             block_partition(split, country)
+        return
+    from joblib import Parallel, delayed
+    threads = max(1, round(C.N_JOBS / n_jobs))
+    _log(f"[blocking] {len(jobs)} partitions on {n_jobs} workers × "
+         f"{threads} threads: {jobs}")
+    for done in Parallel(n_jobs=n_jobs, backend="loky", return_as="generator_unordered")(
+            delayed(_block_worker)(s, c, threads) for s, c in jobs):
+        _log(f"[blocking] partition done: {done}")
 
 
 # ---------------------------------------------------------------------------
@@ -643,8 +697,8 @@ def blocking_recall_report() -> None:
     from . import splits as splits_mod
     gt = explode_ground_truth(read_ground_truth(C.TRAIN_GT))
     split = splits_mod.load()
-    gv = split.loc[split["group"].isin(["G", "V"]), "entity_id"]
-    gt_gv = gt[gt["source1_entity_id"].isin(set(gv))]
+    gv = split.loc[split["group"].isin(["G", "V"])]
+    gt_gv = gt[gt["source1_entity_id"].isin(set(gv["entity_id"]))]
 
     per_country = {}
     for country_path in C.BLOCKING_DIR.glob("train__*.parquet"):
@@ -652,8 +706,10 @@ def blocking_recall_report() -> None:
         cand = pd.read_parquet(country_path,
                                columns=["s1_id", "cand_id", "n_arms_hit"])
         cand_set = set(zip(cand["s1_id"], cand["cand_id"]))
+        # All G∪V S1 of this country (not only those that got candidates),
+        # otherwise S1 with zero candidates silently inflate recall.
         gt_country = gt_gv[gt_gv["source1_entity_id"].isin(
-            cand["s1_id"].unique())]
+            set(gv.loc[gv["country"] == country, "entity_id"]))]
         gt_pairs = set(
             zip(gt_country["source1_entity_id"], gt_country["matched_id"]))
         hits = len(gt_pairs & cand_set)
